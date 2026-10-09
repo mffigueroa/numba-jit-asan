@@ -19,11 +19,32 @@ class AddressSanitizerTests(unittest.TestCase):
         if not cls.plugin.is_file():
             raise RuntimeError("Build the plugin with numba-asan build before testing")
         cls.runtime = _runtime()
+        cls.jit_directory = tempfile.TemporaryDirectory(prefix="asan-test-jit-")
+        cls.native_directory = tempfile.TemporaryDirectory(prefix="asan-test-native-")
+        cls.native_libraries = {}
+        for instrumented in (False, True):
+            path = Path(cls.native_directory.name) / f"native_{instrumented}.so"
+            command = [
+                "clang++-20", "-shared", "-fPIC", "-g", "-O1",
+                str(ROOT / "tests" / "native_access.cpp"), "-o", str(path),
+            ]
+            if instrumented:
+                command += ["-fsanitize=address", "-fno-omit-frame-pointer"]
+            subprocess.run(command, check=True)
+            cls.native_libraries[instrumented] = path
 
-    def run_case(self, case, *, cache=None, sanitized=True, leaks=False):
+    @classmethod
+    def tearDownClass(cls):
+        cls.jit_directory.cleanup()
+        cls.native_directory.cleanup()
+
+    def run_case(self, case, *, cache=None, sanitized=True, leaks=False, native=None):
         env = os.environ.copy()
         env["NUMBA_NUM_THREADS"] = "2"
         env["NUMBA_THREADING_LAYER"] = "workqueue"
+        env["NUMBA_ASAN_JIT_DIR"] = self.jit_directory.name
+        if native is not None:
+            env["ASAN_TEST_NATIVE_LIBRARY"] = str(self.native_libraries[native])
         env["ASAN_OPTIONS"] = f"detect_leaks={int(leaks)}:halt_on_error=1"
         if leaks:
             env["ASAN_OPTIONS"] += ":malloc_context_size=4"
@@ -121,6 +142,62 @@ class AddressSanitizerTests(unittest.TestCase):
             with self.subTest(case=case):
                 result = self.run_case(case)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nrt_exact_payload_boundaries(self):
+        for case in ("nrt_one_past", "nrt_underflow", "nrt_metadata"):
+            with self.subTest(case=case):
+                self.assert_asan(self.run_case(case), "heap-buffer-overflow", "WRITE")
+
+    def test_nrt_api_and_destructor_semantics(self):
+        for case in ("nrt_api", "nrt_destructor"):
+            with self.subTest(case=case):
+                result = self.run_case(case)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_custom_allocator_guards(self):
+        for case in (
+            "external_overflow", "external_underflow",
+            "external_mmap_overflow", "external_mmap_underflow",
+        ):
+            with self.subTest(case=case):
+                result = self.run_case(case)
+                self.assert_asan(result, "use-after-poison", "WRITE")
+        for case in ("external_safe", "external_mmap_safe"):
+            result = self.run_case(case)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("freed the original base", result.stdout)
+
+    def test_numpy_small_buffer_lifetime(self):
+        self.assert_asan(self.run_case("numpy_small_uaf"), "heap-use-after-free", "READ")
+
+    def test_numpy_policy_threads_and_explicit_contexts(self):
+        for case in ("numpy_thread", "numpy_context"):
+            with self.subTest(case=case):
+                result = self.run_case(case)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_jit_source_diagnostics(self):
+        result = self.run_case("write")
+        self.assert_asan(result, "heap-buffer-overflow", "WRITE")
+        self.assertIn("Numba ASan JIT frame #0:", result.stderr)
+        self.assertIn("5write", result.stderr)
+        line = CASES.read_text().splitlines().index("    values[index] = 123") + 1
+        self.assertIn(f"{CASES}:{line}:", result.stderr)
+
+    def test_debug_info_does_not_change_boundscheck(self):
+        self.assert_asan(self.run_case("default_unchecked"), "heap-buffer-overflow", "READ")
+        result = self.run_case("checked")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("explicit bounds checking preserved", result.stdout)
+
+    def test_native_access_requires_native_instrumentation(self):
+        uninstrumented = self.run_case("native_store", native=False)
+        self.assertEqual(uninstrumented.returncode, 0, uninstrumented.stderr)
+        self.assertNotIn("ERROR: AddressSanitizer", uninstrumented.stderr)
+        instrumented = self.run_case("native_store", native=True)
+        self.assert_asan(instrumented, "heap-buffer-overflow", "WRITE")
+        self.assertIn("unchecked_native_store", instrumented.stderr)
+        self.assertIn("native_access.cpp:5", instrumented.stderr)
 
     def test_module_entry_point(self):
         result = subprocess.run(

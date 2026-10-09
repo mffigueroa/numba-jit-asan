@@ -1,0 +1,36 @@
+name: Sanitizer tests and distribution
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM and Python headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-20-dev clang-20 libclang-rt-20-dev python3-dev python3-venv
+      - name: Install package
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -e .
+          .venv/bin/python -m pip check
+      - name: Build native integration
+        run: .venv/bin/numba-asan build
+      - name: Run real sanitizer regressions
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Build wheel
+        run: .venv/bin/python -m pip wheel --no-deps . -w dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: dist/*.whl
+          if-no-files-found: error

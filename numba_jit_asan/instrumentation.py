@@ -31,11 +31,30 @@ def enable(*, opt: str, plugin: Path) -> None:
     if not plugin.is_file():
         raise RuntimeError(f"Missing ASan pass plugin: {plugin}")
 
+    from .allocators import install
+    from .diagnostics import Diagnostics
+    from numba.core.cpu import CPUTargetOptions
+    from numba.np.ufunc.ufuncbuilder import UFuncTargetOptions
+
+    native = install(plugin.with_name("numba_asan_native.so"))
+    diagnostics = Diagnostics(native)
+    for options_class in (CPUTargetOptions, UFuncTargetOptions):
+        original_options = options_class.finalize
+
+        def finalize_options(self, flags, options, original=original_options):
+            original(self, flags, options)
+            # Resolve boundscheck defaults before enabling debug info.
+            flags.debuginfo = True
+
+        options_class.finalize = finalize_options
     library_class = codegen.JITCodeLibrary
     original_finalize = library_class._finalize_final_module
     original_linking = library_class._get_module_for_linking
 
     def finalize(library):
+        library._asan_native = native
+        if not library._object_caching_enabled:
+            library.enable_object_caching()
         library._asan_pristine_module = library._final_module.clone()
         result = subprocess.run(
             [
@@ -65,6 +84,7 @@ def enable(*, opt: str, plugin: Path) -> None:
         module.verify()
         library._final_module = module
         original_finalize(library)
+        diagnostics.register(library, token)
 
         engine = library._codegen._engine
         for kind in ("ctor", "dtor"):
@@ -98,7 +118,8 @@ def enable(*, opt: str, plugin: Path) -> None:
     caching.Cache.enable = disable_cache
     warnings.warn(
         "Experimental Numba ASan enabled; all Numba disk caches are disabled. "
-        "Native extension code and logical array/view bounds are not covered.",
+        "NRT payloads and NumPy allocations use ASan-aware policies. "
+        "Unrebuilt native extensions and logical array/view bounds remain uncovered.",
         RuntimeWarning,
         stacklevel=2,
     )

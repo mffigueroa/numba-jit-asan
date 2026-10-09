@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 
 DEFAULT_PLUGIN = Path(".build/numba_asan_pass.so")
@@ -40,7 +41,20 @@ def build_plugin(output: Path) -> None:
          *flags, "-o", str(output)],
         check=True,
     )
+    import numpy
+
+    native = output.with_name("numba_asan_native.so")
+    subprocess.run(
+        [
+            compiler, "-shared", "-fPIC", "-g", "-O1", "-std=c++17",
+            "-fsanitize=address", "-fno-omit-frame-pointer",
+            f"-I{numpy.get_include()}", f"-I{sysconfig.get_path('include')}",
+            str(Path(__file__).with_name("native.cpp")), "-o", str(native),
+        ],
+        check=True,
+    )
     print(f"Built {output.resolve()}")
+    print(f"Built {native.resolve()}")
 
 
 def _runtime() -> Path:
@@ -59,6 +73,8 @@ def launch(plugin: Path, target: list[str]) -> None:
         raise RuntimeError("This prototype currently supports Linux x86-64 only")
     if not plugin.is_file():
         raise RuntimeError("ASan plugin is missing; run numba-asan build first")
+    if not plugin.with_name("numba_asan_native.so").is_file():
+        raise RuntimeError("ASan native bridge is missing; run numba-asan build again")
     opt = _tool("opt-20")
     _llvm20(opt)
     runtime = _runtime()
