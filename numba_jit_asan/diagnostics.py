@@ -1,34 +1,24 @@
-import ctypes
 import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 
 
 class Diagnostics:
-    def __init__(self, native):
-        self.native = native
-        self.symbolizer = shutil.which("llvm-symbolizer-20")
+    """Records JIT object code and address ranges for report symbolization."""
+
+    def __init__(self):
         self.nm = shutil.which("llvm-nm-20")
-        if not self.symbolizer or not self.nm:
-            raise RuntimeError("JIT diagnostics require llvm-symbolizer-20 and llvm-nm-20")
-        directory = os.environ.get("NUMBA_ASAN_JIT_DIR")
-        if directory:
-            self.directory = Path(directory).resolve()
-            self.directory.mkdir(parents=True, exist_ok=True)
-        else:
-            self.temporary = tempfile.TemporaryDirectory(prefix="numba-asan-jit-")
-            self.directory = Path(self.temporary.name)
-        self.native.numba_asan_register_frame.argtypes = [
-            ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t,
-            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
-        ]
-        self.native.numba_asan_register_frame.restype = None
-        self.native.numba_asan_install_report_callback.restype = None
-        self.native.numba_asan_install_report_callback()
+        if not self.nm:
+            raise RuntimeError("JIT diagnostics require llvm-nm-20")
+        self.directory = Path(os.environ["NUMBA_SANITIZER_JIT_DIR"]).resolve()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.frames = self.directory / f"frames.{os.getpid()}.tsv"
 
     def register(self, library, token):
+        if self.frames.name != f"frames.{os.getpid()}.tsv":
+            # Forked child: parent ranges stay valid; record new ones separately.
+            self.frames = self.directory / f"frames.{os.getpid()}.tsv"
         object_path = self.directory / f"{token}.o"
         object_path.write_bytes(library._get_compiled_object())
         result = subprocess.run(
@@ -36,17 +26,15 @@ class Diagnostics:
             capture_output=True, text=True, check=True,
         )
         engine = library._codegen._engine
+        rows = []
         for line in result.stdout.splitlines():
             fields = line.split(maxsplit=3)
             if len(fields) != 4 or fields[2] not in ("t", "T", "w", "W"):
                 continue
             offset, size, _, name = fields
             size = int(size, 16)
-            if not size:
-                continue
-            address = engine.get_function_address(name)
+            address = engine.get_function_address(name) if size else 0
             if address:
-                self.native.numba_asan_register_frame(
-                    address, size, int(offset, 16), name.encode(),
-                    os.fsencode(object_path), os.fsencode(self.symbolizer),
-                )
+                rows.append(f"{address:x}\t{size:x}\t{offset}\t{name}\t{object_path}\n")
+        with self.frames.open("a") as frames:
+            frames.writelines(rows)

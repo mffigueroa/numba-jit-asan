@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numba==0.62.1", "llvmlite==0.45.1"]
 
+[project.optional-dependencies]
+fuzz = ["atheris==3.1.0"]
+
 [project.scripts]
 numba-asan = "numba_jit_asan.runner:main"
 
@@ -17,4 +20,4 @@ numba-asan = "numba_jit_asan.runner:main"
 include = ["numba_jit_asan*"]
 
 [tool.setuptools.package-data]
-numba_jit_asan = ["*.cpp"]
+numba_jit_asan = ["*.cpp", "*.c", "*.supp"]

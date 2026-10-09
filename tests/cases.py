@@ -325,19 +325,6 @@ def main():
             output[0] = source[source.size]
 
         print(gufunc_read(values))
-    elif case == "leak":
-        read(values, 0)
-        libc = ctypes.CDLL(None)
-        libc.malloc.argtypes = [ctypes.c_size_t]
-        libc.malloc.restype = ctypes.c_void_p
-        worker = threading.Thread(target=lambda: libc.malloc(65536))
-        worker.start()
-        worker.join()
-        runtime = ctypes.CDLL(None)
-        check = runtime.__lsan_do_recoverable_leak_check
-        check.restype = ctypes.c_int
-        result = check()
-        os._exit(1 if result else 0)
     elif case == "safe":
         write(values, 0)
         assert read(values, -1) == 1

@@ -1,8 +1,24 @@
+// Built twice: with -fsanitize=address (guarded payloads + NumPy policy) and
+// with -fsanitize=memory (NRT payloads start uninitialized).
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#define NUMBA_MSAN 1
+#endif
+#endif
+
+#ifdef NUMBA_MSAN
+#include <sanitizer/msan_interface.h>
+#define POISON_GUARD(address, size) ((void)0)
+#define UNPOISON_GUARD(address, size) ((void)0)
+#else
 #define PY_SSIZE_T_CLEAN
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <sanitizer/asan_interface.h>
+#define POISON_GUARD __asan_poison_memory_region
+#define UNPOISON_GUARD __asan_unpoison_memory_region
+#endif
 
 #include <atomic>
 #include <cerrno>
@@ -10,12 +26,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <cstdio>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-extern char **environ;
 
 using Destructor = void (*)(void *, size_t, void *);
 struct ExternalAllocator {
@@ -55,7 +65,7 @@ static void destroy_payload(void *data, size_t size, void *info) {
     memset(data, 0xDE, size);
   if (payload->external) {
     // A custom allocator may write free-list metadata inside the returned block.
-    __asan_unpoison_memory_region(payload->base, payload->allocation_size);
+    UNPOISON_GUARD(payload->base, payload->allocation_size);
     payload->external->free(payload->base, payload->external->opaque);
   } else {
     free(payload->base);
@@ -92,9 +102,9 @@ static MemInfo *allocate_payload(size_t size, unsigned alignment, bool safe,
       uintptr_t start = reinterpret_cast<uintptr_t>(base);
       uintptr_t aligned = (start + guard + align - 1) & ~(align - 1);
       data = reinterpret_cast<void *>(aligned);
-      __asan_unpoison_memory_region(base, allocation_size);
-      __asan_poison_memory_region(base, allocation_size);
-      __asan_unpoison_memory_region(data, size);
+      UNPOISON_GUARD(base, allocation_size);
+      POISON_GUARD(base, allocation_size);
+      UNPOISON_GUARD(data, size);
     }
   } else {
     int error = posix_memalign(&base, align, size);
@@ -110,7 +120,7 @@ static MemInfo *allocate_payload(size_t size, unsigned alignment, bool safe,
   MemInfo *metadata = allocate_metadata(0, nullptr);
   if (!metadata) {
     if (external) {
-      __asan_unpoison_memory_region(base, allocation_size);
+      UNPOISON_GUARD(base, allocation_size);
       external->free(base, external->opaque);
     } else {
       free(base);
@@ -124,6 +134,14 @@ static MemInfo *allocate_payload(size_t size, unsigned alignment, bool safe,
   metadata->destructor = destroy_payload;
   if (safe)
     memset(data, 0xCB, size);
+#ifdef NUMBA_MSAN
+  else
+    // MSAN_OPTIONS=poison_in_malloc=0 avoids false positives from
+    // uninstrumented code; only NRT payloads are marked uninitialized.
+    // (__msan_allocated_memory would record an allocation origin, but honors
+    // the process-wide poison_in_malloc=0, so origins are not available.)
+    __msan_poison(data, size);
+#endif
   return metadata;
 }
 
@@ -172,6 +190,22 @@ extern "C" void numba_asan_init_api(const RuntimeAPI *original) {
 }
 extern "C" const RuntimeAPI *numba_asan_get_api() { return &runtime_api; }
 
+#ifdef NUMBA_MSAN
+// Thread-local shadow state of the MSan runtime, resolved here through the
+// dynamic linker; JIT code calls these getters (see asan_pass.cpp).
+#define NUMBA_TLS_GETTER(name)                                                 \
+  extern "C" __thread char name[];                                             \
+  extern "C" void *numba_tls_##name() { return name; }
+NUMBA_TLS_GETTER(__msan_param_tls)
+NUMBA_TLS_GETTER(__msan_param_origin_tls)
+NUMBA_TLS_GETTER(__msan_retval_tls)
+NUMBA_TLS_GETTER(__msan_retval_origin_tls)
+NUMBA_TLS_GETTER(__msan_va_arg_tls)
+NUMBA_TLS_GETTER(__msan_va_arg_origin_tls)
+NUMBA_TLS_GETTER(__msan_va_arg_overflow_size_tls)
+#endif
+
+#ifndef NUMBA_MSAN
 static void *numpy_malloc(void *, size_t size) { return malloc(size); }
 static void *numpy_calloc(void *, size_t count, size_t size) {
   return calloc(count, size);
@@ -197,85 +231,4 @@ extern "C" int numba_asan_install_numpy() {
   Py_DECREF(previous);
   return 0;
 }
-
-struct Frame {
-  uintptr_t address;
-  uintptr_t size;
-  uintptr_t object_offset;
-  char *name;
-  char *object;
-  char *symbolizer;
-  Frame *next;
-};
-static std::atomic<Frame *> frames{nullptr};
-
-extern "C" void numba_asan_register_frame(uintptr_t address, uintptr_t size,
-                                         uintptr_t offset, const char *name,
-                                         const char *object,
-                                         const char *symbolizer) {
-  auto *frame = static_cast<Frame *>(malloc(sizeof(Frame)));
-  if (!frame)
-    abort();
-  *frame = {address, size, offset, strdup(name), strdup(object),
-            strdup(symbolizer), nullptr};
-  if (!frame->name || !frame->object || !frame->symbolizer)
-    abort();
-  frame->next = frames.load();
-  while (!frames.compare_exchange_weak(frame->next, frame)) {}
-}
-
-static void report_jit_frames(const char *report) {
-  const char *line = report;
-  while ((line = strchr(line, '#'))) {
-    unsigned number;
-    unsigned long pc;
-    if (sscanf(line, "#%u 0x%lx", &number, &pc) == 2) {
-      for (Frame *frame = frames.load(); frame; frame = frame->next) {
-        if (pc < frame->address || pc - frame->address >= frame->size)
-          continue;
-        uintptr_t offset = frame->object_offset + pc - frame->address;
-        fprintf(stderr, "\nNumba ASan JIT frame #%u: %s\n", number, frame->name);
-        fprintf(stderr, "  object: %s, offset: 0x%lx\n", frame->object,
-                static_cast<unsigned long>(offset));
-        fflush(stderr);
-        char address[32];
-        snprintf(address, sizeof(address), "0x%lx",
-                 static_cast<unsigned long>(offset));
-        char demangle[] = "--demangle";
-        char object_flag[] = "--obj";
-        char *arguments[] = {frame->symbolizer, demangle, object_flag,
-                             frame->object, address, nullptr};
-        posix_spawn_file_actions_t actions;
-        int error = posix_spawn_file_actions_init(&actions);
-        if (error) {
-          fprintf(stderr, "Numba ASan: cannot initialize JIT symbolizer: %d\n", error);
-          break;
-        }
-        error = posix_spawn_file_actions_adddup2(
-            &actions, STDERR_FILENO, STDOUT_FILENO);
-        pid_t child;
-        if (!error)
-          error = posix_spawn(&child, frame->symbolizer, &actions, nullptr,
-                              arguments, environ);
-        posix_spawn_file_actions_destroy(&actions);
-        if (!error) {
-          int status = 0;
-          pid_t waited;
-          do {
-            waited = waitpid(child, &status, 0);
-          } while (waited < 0 && errno == EINTR);
-          if (waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status))
-            fprintf(stderr, "Numba ASan: JIT symbolizer failed\n");
-        } else {
-          fprintf(stderr, "Numba ASan: cannot launch JIT symbolizer: %d\n", error);
-        }
-        break;
-      }
-    }
-    ++line;
-  }
-}
-
-extern "C" void numba_asan_install_report_callback() {
-  __asan_set_error_report_callback(report_jit_frames);
-}
+#endif

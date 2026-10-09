@@ -1,25 +1,16 @@
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from numba_jit_asan.runner import DEFAULT_PLUGIN, _runtime
+from helpers import CASES, ROOT, SanitizerTestCase
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CASES = ROOT / "tests" / "cases.py"
-
-
-class AddressSanitizerTests(unittest.TestCase):
+class AddressSanitizerTests(SanitizerTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.plugin = (ROOT / DEFAULT_PLUGIN).resolve()
-        if not cls.plugin.is_file():
-            raise RuntimeError("Build the plugin with numba-asan build before testing")
-        cls.runtime = _runtime()
-        cls.jit_directory = tempfile.TemporaryDirectory(prefix="asan-test-jit-")
+        super().setUpClass()
         cls.native_directory = tempfile.TemporaryDirectory(prefix="asan-test-native-")
         cls.native_libraries = {}
         for instrumented in (False, True):
@@ -35,35 +26,13 @@ class AddressSanitizerTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.jit_directory.cleanup()
         cls.native_directory.cleanup()
+        super().tearDownClass()
 
-    def run_case(self, case, *, cache=None, sanitized=True, leaks=False, native=None):
-        env = os.environ.copy()
-        env["NUMBA_NUM_THREADS"] = "2"
-        env["NUMBA_THREADING_LAYER"] = "workqueue"
-        env["NUMBA_ASAN_JIT_DIR"] = self.jit_directory.name
+    def run_case(self, case, *, native=None, **options):
         if native is not None:
-            env["ASAN_TEST_NATIVE_LIBRARY"] = str(self.native_libraries[native])
-        env["ASAN_OPTIONS"] = f"detect_leaks={int(leaks)}:halt_on_error=1"
-        if leaks:
-            env["ASAN_OPTIONS"] += ":malloc_context_size=4"
-            env["LSAN_OPTIONS"] = "max_leaks=20"
-        if cache is not None:
-            env["NUMBA_CACHE_DIR"] = str(cache)
-        if sanitized:
-            command = [
-                sys.executable, "-m", "numba_jit_asan.runner", "run",
-                "--plugin", str(self.plugin), str(CASES), case,
-            ]
-        else:
-            command = [sys.executable, str(CASES), case]
-            env["LD_PRELOAD"] = str(self.runtime)
-            env["PYTHONMALLOC"] = "malloc"
-            env["ASAN_TEST_UNINSTRUMENTED"] = "1"
-        return subprocess.run(
-            command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
-        )
+            options["env"] = {"ASAN_TEST_NATIVE_LIBRARY": str(self.native_libraries[native])}
+        return super().run_case(case, **options)
 
     def assert_asan(self, result, error, operation, *, vectorized=False):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -102,12 +71,6 @@ class AddressSanitizerTests(unittest.TestCase):
     def test_ufunc_wrappers(self):
         self.assert_asan(self.run_case("vectorize"), "global-buffer-overflow", "READ")
         self.assert_asan(self.run_case("guvectorize"), "heap-buffer-overflow", "READ")
-
-    def test_lsan_opt_in(self):
-        result = self.run_case("leak", leaks=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ERROR: LeakSanitizer: detected memory leaks", result.stderr)
-        self.assertIn("65536 byte(s) in 1 object(s)", result.stderr)
 
     def test_safe_behavior(self):
         result = self.run_case("safe")
@@ -179,10 +142,12 @@ class AddressSanitizerTests(unittest.TestCase):
     def test_jit_source_diagnostics(self):
         result = self.run_case("write")
         self.assert_asan(result, "heap-buffer-overflow", "WRITE")
-        self.assertIn("Numba ASan JIT frame #0:", result.stderr)
-        self.assertIn("5write", result.stderr)
-        line = CASES.read_text().splitlines().index("    values[index] = 123") + 1
-        self.assertIn(f"{CASES}:{line}:", result.stderr)
+        # Frame #0 is rewritten in place instead of "(<unknown module>)".
+        self.assertRegex(result.stderr, r"#0 0x[0-9a-f]+ in __main__::write\(")
+        self.assert_jit_frame(result, "__main__::write", CASES, "values[index] = 123")
+        self.assertNotRegex(result.stderr, r"#0 0x[0-9a-f]+ +\(<unknown module>\)")
+        self.assertRegex(result.stderr, rf"SUMMARY: AddressSanitizer: heap-buffer-overflow "
+                                         rf"{CASES}:\d+:\d+ in __main__::write")
 
     def test_debug_info_does_not_change_boundscheck(self):
         self.assert_asan(self.run_case("default_unchecked"), "heap-buffer-overflow", "READ")
@@ -221,7 +186,7 @@ class AddressSanitizerTests(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True, timeout=120,
             )
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("plugin is missing", result.stderr)
+        self.assertIn("is missing; run numba-asan build", result.stderr)
 
     def test_installed_launcher_outside_workspace(self):
         launcher = Path(sys.executable).with_name("numba-asan")

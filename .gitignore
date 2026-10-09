@@ -1,6 +1,13 @@
-.venv/
+.venv*/
 __pycache__/
 *.egg-info/
 build/
 dist/
 .build/
+# libFuzzer/Atheris artifacts
+crash-*
+timeout-*
+oom-*
+leak-*
+slow-unit-*
+fuzz-*.log

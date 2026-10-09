@@ -1,0 +1,3 @@
+# Known leaks in llvmlite pass-builder bindings (compiler internals, not
+# JIT-compiled user code, which never executes from libllvmlite.so frames).
+leak:libllvmlite.so

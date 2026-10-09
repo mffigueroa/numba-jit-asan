@@ -1,4 +1,5 @@
 import ctypes
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -7,16 +8,40 @@ import warnings
 import weakref
 
 
-def enable(*, opt: str, plugin: Path) -> None:
+SANITIZERS = {
+    # name: (runtime probe symbol, LLVM pipeline, constructor prefix)
+    "address": ("__asan_version_mismatch_check_v8", "numba-asan", "asan"),
+    "thread": ("__tsan_init", "numba-tsan", "tsan"),
+    "memory": ("__msan_init", "numba-msan", "msan"),
+}
+
+
+def _run_opt(opt, plugin, pipeline, module_text, name):
+    result = subprocess.run(
+        [opt, f"-load-pass-plugin={plugin}", f"-passes={pipeline}", "-S", "-o", "-"],
+        input=module_text, text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"LLVM {pipeline} instrumentation failed for {name}:\n"
+                           f"{result.stderr}")
+    return result.stdout
+
+
+def enable(*, opt: str, plugin: Path, sanitizer: str = "address",
+           undefined: bool = False, coverage: bool = False) -> None:
     """Install process-wide CPU instrumentation before importing Numba."""
     if "numba" in sys.modules:
-        raise RuntimeError("ASan must be enabled before importing Numba")
-    process = ctypes.CDLL(None)
+        raise RuntimeError("Sanitizers must be enabled before importing Numba")
+    probe, pipeline, prefix = SANITIZERS[sanitizer]
+    if coverage:
+        # libFuzzer-compatible SanitizerCoverage for coverage-guided fuzzing.
+        pipeline = f"numba-sancov,{pipeline}"
     try:
-        process.__asan_version_mismatch_check_v8
+        getattr(ctypes.CDLL(None), probe)
     except AttributeError as exc:
         raise RuntimeError(
-            "ASan must be preloaded at process startup; use numba-asan run"
+            f"The {sanitizer} sanitizer runtime must be loaded at process startup; "
+            "use numba-asan run"
         ) from exc
 
     import llvmlite
@@ -29,15 +54,24 @@ def enable(*, opt: str, plugin: Path) -> None:
     if llvm.llvm_version_info[0] != 20:
         raise RuntimeError("This prototype requires llvmlite built with LLVM 20")
     if not plugin.is_file():
-        raise RuntimeError(f"Missing ASan pass plugin: {plugin}")
+        raise RuntimeError(f"Missing sanitizer pass plugin: {plugin}")
 
-    from .allocators import install
+    from . import atheris_compat
     from .diagnostics import Diagnostics
     from numba.core.cpu import CPUTargetOptions
     from numba.np.ufunc.ufuncbuilder import UFuncTargetOptions
 
-    native = install(plugin.with_name("numba_asan_native.so"))
-    diagnostics = Diagnostics(native)
+    keepalive = []
+    if sanitizer == "address":
+        from .allocators import install
+
+        keepalive.append(install(plugin.with_name("numba_asan_native.so")))
+    elif sanitizer == "memory":
+        from .allocators import install_msan
+
+        keepalive.append(install_msan(plugin.with_name("numba_msan_native.so")))
+    diagnostics = Diagnostics()
+    atheris_compat.install(os.environ.get("NUMBA_ASAN_RELAUNCH"))
     for options_class in (CPUTargetOptions, UFuncTargetOptions):
         original_options = options_class.finalize
 
@@ -47,64 +81,71 @@ def enable(*, opt: str, plugin: Path) -> None:
             flags.debuginfo = True
 
         options_class.finalize = finalize_options
+
+    cpu_library = codegen.CPUCodeLibrary
+    original_add_module = cpu_library.add_llvm_module
+    if undefined:
+        def add_llvm_module(library, ll_module):
+            # Before optimization: LLVM may otherwise exploit the poison values.
+            name = ll_module.name
+            text = _run_opt(opt, plugin, "numba-ubsan", str(ll_module), name)
+            ll_module = llvm.parse_assembly(text)
+            ll_module.name = name
+            ll_module.verify()
+            return original_add_module(library, ll_module)
+
+        cpu_library.add_llvm_module = add_llvm_module
+
     library_class = codegen.JITCodeLibrary
     original_finalize = library_class._finalize_final_module
     original_linking = library_class._get_module_for_linking
+    callback_names = {
+        f"{prefix}.module_ctor": "ctor", f"{prefix}.module_dtor": "dtor",
+        "sancov.module_ctor_8bit_counters": "ctor",
+    }
 
     def finalize(library):
-        library._asan_native = native
+        library._sanitizer_keepalive = keepalive
         if not library._object_caching_enabled:
             library.enable_object_caching()
-        library._asan_pristine_module = library._final_module.clone()
-        result = subprocess.run(
-            [
-                opt, f"-load-pass-plugin={plugin}", "-passes=numba-asan",
-                "-S", "-o", "-",
-            ],
-            input=str(library._final_module),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"LLVM ASan instrumentation failed for {library.name}:\n"
-                f"{result.stderr}"
-            )
-        module = llvm.parse_assembly(result.stdout)
+        library._sanitizer_pristine_module = library._final_module.clone()
+        text = _run_opt(opt, plugin, pipeline, str(library._final_module), library.name)
+        module = llvm.parse_assembly(text)
         module.name = library._final_module.name
         token = uuid.uuid4().hex
-        callbacks = {}
+        callbacks = []
         for function in module.functions:
-            if function.name in ("asan.module_ctor", "asan.module_dtor"):
-                kind = function.name.rsplit("_", 1)[-1]
-                function.name = f"numba_asan_{kind}_{token}"
+            kind = callback_names.get(function.name)
+            if kind:
+                # Unique external names: MCJIT never runs llvm.global_ctors.
+                origin = function.name.split(".")[0]
+                function.name = f"numba_{origin}_{kind}_{token}"
                 function.linkage = "external"
-                callbacks[kind] = function.name
+                callbacks.append((kind, function.name))
         module.verify()
         library._final_module = module
         original_finalize(library)
         diagnostics.register(library, token)
 
         engine = library._codegen._engine
-        for kind in ("ctor", "dtor"):
-            if kind not in callbacks:
-                continue
-            address = engine.get_function_address(callbacks[kind])
+        for kind, name in callbacks:
+            address = engine.get_function_address(name)
             if not address:
-                raise RuntimeError(f"Cannot resolve ASan module {kind}")
+                raise RuntimeError(f"Cannot resolve {prefix} module {kind}")
             callback = ctypes.CFUNCTYPE(None)(address)
             if kind == "ctor":
                 callback()
+                if name.startswith("numba_sancov_"):
+                    atheris_compat.note_coverage_module()
             else:
                 # Numba retains MCJIT modules even after wrapper libraries die.
-                # Redzones must live as long as the engine, not the library.
+                # Registrations must live as long as the engine, not the library.
                 weakref.finalize(engine, callback)
 
     def get_module_for_linking(library):
         library._ensure_finalized()
         sanitized = library._final_module
-        library._final_module = library._asan_pristine_module
+        library._final_module = library._sanitizer_pristine_module
         try:
             return original_linking(library)
         finally:
@@ -116,10 +157,12 @@ def enable(*, opt: str, plugin: Path) -> None:
     library_class._finalize_final_module = finalize
     library_class._get_module_for_linking = get_module_for_linking
     caching.Cache.enable = disable_cache
+    checks = sanitizer + (" + undefined-behavior checks" if undefined else "") + (
+        " + fuzzer coverage" if coverage else "")
     warnings.warn(
-        "Experimental Numba ASan enabled; all Numba disk caches are disabled. "
-        "NRT payloads and NumPy allocations use ASan-aware policies. "
-        "Unrebuilt native extensions and logical array/view bounds remain uncovered.",
+        f"Experimental Numba sanitizer enabled ({checks}); all Numba disk caches "
+        "are disabled. Unrebuilt native extensions and logical array/view bounds "
+        "remain uncovered.",
         RuntimeWarning,
         stacklevel=2,
     )
