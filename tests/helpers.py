@@ -1,5 +1,6 @@
 """Shared launcher harness: buggy programs only ever run in subprocesses."""
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,23 @@ from numba_jit_asan.runner import DEFAULT_PLUGIN, _runtime
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests" / "cases.py"
 SANITIZER_CASES = ROOT / "tests" / "sanitizer_cases.py"
+
+
+def run_bounded(command, *, timeout, **kwargs):
+    """subprocess.run that kills the whole process group on timeout.
+
+    Plain subprocess.run kills only the direct child; a sanitized grandchild
+    stuck printing reports would otherwise keep writing to a log forever.
+    """
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def source_line(path: Path, text: str) -> int:
@@ -56,9 +74,9 @@ class SanitizerTestCase(unittest.TestCase):
             environment["LD_PRELOAD"] = str(self.runtime)
             environment["PYTHONMALLOC"] = "malloc"
             environment["ASAN_TEST_UNINSTRUMENTED"] = "1"
-        return subprocess.run(
-            command, cwd=ROOT, env=environment, capture_output=True, text=True,
-            timeout=timeout,
+        return run_bounded(
+            command, cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=timeout,
         )
 
     def assert_clean(self, result):

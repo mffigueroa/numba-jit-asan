@@ -53,8 +53,12 @@ class FrameMap:
     def _name(self, mangled: str) -> str:
         if not self.demangler:
             return mangled
-        result = subprocess.run([self.demangler, mangled], capture_output=True,
-                                text=True, check=False)
+        try:
+            result = subprocess.run([self.demangler, mangled], capture_output=True,
+                                    text=True, check=False, timeout=60,
+                                    env=toolchain.clean_env(), stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return mangled
         name = result.stdout.strip() or mangled
         return _ABI_TAG.sub("", name)
 
@@ -68,11 +72,15 @@ class FrameMap:
         if key not in self._cache:
             location = "??"
             if self.symbolizer:
-                result = subprocess.run(
-                    [self.symbolizer, "--obj", frame.object, hex(offset)],
-                    capture_output=True, text=True, check=False,
-                )
-                lines = [line for line in result.stdout.splitlines() if line]
+                try:
+                    result = subprocess.run(
+                        [self.symbolizer, "--obj", frame.object, hex(offset)],
+                        capture_output=True, text=True, check=False, timeout=60,
+                        env=toolchain.clean_env(), stdin=subprocess.DEVNULL,
+                    )
+                    lines = [line for line in result.stdout.splitlines() if line]
+                except subprocess.TimeoutExpired:
+                    lines = []
                 if len(lines) >= 2 and not lines[1].startswith("??"):
                     location = lines[1]
             self._cache[key] = (self._name(frame.name), location, offset)

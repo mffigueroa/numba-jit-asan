@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 
-from helpers import CASES, ROOT, SanitizerTestCase
+from helpers import CASES, ROOT, SanitizerTestCase, run_bounded
 from numba_jit_asan.toolchain import tool_name
 
 
@@ -166,25 +166,25 @@ class AddressSanitizerTests(SanitizerTestCase):
         self.assertIn("native_access.cpp:5", instrumented.stderr)
 
     def test_module_entry_point(self):
-        result = subprocess.run(
+        result = run_bounded(
             [
                 sys.executable, "-m", "numba_jit_asan.runner", "run",
                 "--plugin", str(self.plugin), "--", "-m", "numba_jit_asan.runner",
                 "--help",
             ],
-            cwd=ROOT, capture_output=True, text=True, timeout=120,
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Run real LLVM AddressSanitizer", result.stdout)
 
     def test_missing_plugin_fails_explicitly(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
+            result = run_bounded(
                 [
                     sys.executable, "-m", "numba_jit_asan.runner", "run",
                     "--plugin", str(Path(directory) / "missing.so"), str(CASES), "safe",
                 ],
-                cwd=ROOT, capture_output=True, text=True, timeout=120,
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
             )
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("is missing; run numba-asan build", result.stderr)
@@ -192,12 +192,13 @@ class AddressSanitizerTests(SanitizerTestCase):
     def test_installed_launcher_outside_workspace(self):
         launcher = Path(sys.executable).with_name("numba-asan")
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
+            result = run_bounded(
                 [
                     str(launcher), "run", "--plugin", str(self.plugin),
                     str(ROOT / "examples" / "safe.py"),
                 ],
-                cwd=directory, capture_output=True, text=True, timeout=120,
+                cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=120,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("safe code passed", result.stdout)

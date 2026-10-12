@@ -12,7 +12,7 @@ import sysconfig
 import tempfile
 
 from .symbolize import FrameMap, rewrite
-from .toolchain import llvm_major, tool as _tool, which as which_tool
+from .toolchain import clean_env, llvm_major, tool as _tool, which as which_tool
 
 
 # Per environment: artifacts must match this environment's Numba/LLVM, and
@@ -44,13 +44,13 @@ def build_plugin(output: Path) -> None:
     compiler = _tool("clang++")
     flags = shlex.split(subprocess.check_output(
         [config, "--cxxflags", "--ldflags", "--system-libs", "--libs",
-         "passes", "instrumentation"], text=True,
+         "passes", "instrumentation"], text=True, env=clean_env(),
     ))
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [compiler, "-shared", "-fPIC", str(Path(__file__).with_name("asan_pass.cpp")),
          *flags, "-o", str(output)],
-        check=True,
+        check=True, env=clean_env(),
     )
     native = output.with_name("numba_asan_native.so")
     subprocess.run(
@@ -60,7 +60,7 @@ def build_plugin(output: Path) -> None:
             f"-I{_numpy_include()}", f"-I{sysconfig.get_path('include')}",
             str(Path(__file__).with_name("native.cpp")), "-o", str(native),
         ],
-        check=True,
+        check=True, env=clean_env(),
     )
     print(f"Built {output.resolve()}")
     print(f"Built {native.resolve()}")
@@ -80,7 +80,7 @@ def _build_fuzzer_runtime(compiler: str, directory: Path) -> None:
     printing DEADLYSIGNAL.
     """
     linux = Path(subprocess.check_output(
-        [compiler, "-print-file-name=libclang_rt.asan-x86_64.a"], text=True,
+        [compiler, "-print-file-name=libclang_rt.asan-x86_64.a"], text=True, env=clean_env(),
     ).strip()).parent
     asan = linux / "libclang_rt.asan-x86_64.a"
     fuzzer = linux / "libclang_rt.fuzzer_no_main-x86_64.a"
@@ -92,11 +92,12 @@ def _build_fuzzer_runtime(compiler: str, directory: Path) -> None:
         archive = Path(scratch) / "asan.a"
         shutil.copyfile(asan, archive)
         # The preinit object only works in executables, not shared libraries.
-        subprocess.run(["ar", "d", str(archive), "asan_preinit.cpp.o"], check=True)
+        subprocess.run(["ar", "d", str(archive), "asan_preinit.cpp.o"], check=True,
+                       env=clean_env())
         subprocess.run(
             [compiler, "-shared", "-Wl,--whole-archive", str(fuzzer), str(archive),
              "-Wl,--no-whole-archive", "-lpthread", "-ldl", "-o", str(output)],
-            check=True,
+            check=True, env=clean_env(),
         )
     print(f"Built {output.resolve()}")
 
@@ -115,7 +116,7 @@ def _build_msan(compiler: str, directory: Path) -> None:
     subprocess.run(
         [compiler, "-shared", "-fPIC", "-std=c++17", *common,
          str(Path(__file__).with_name("native.cpp")), "-o", str(native)],
-        check=True,
+        check=True, env=clean_env(),
     )
     executable = directory / "numba-msan-python"
     name = library.removeprefix("lib").removesuffix(".so")
@@ -124,7 +125,7 @@ def _build_msan(compiler: str, directory: Path) -> None:
          f"-I{sysconfig.get_path('include')}",
          str(Path(__file__).with_name("msan_python.c")),
          f"-L{libdir}", f"-Wl,-rpath,{libdir}", f"-l{name}", "-o", str(executable)],
-        check=True,
+        check=True, env=clean_env(),
     )
     print(f"Built {native.resolve()}")
     print(f"Built {executable.resolve()}")
@@ -252,7 +253,8 @@ def instrumented_dependencies(symbol: str = "__asan_init") -> dict[str, bool]:
         result[name] = bool(extensions) and all(
             symbol in subprocess.run(
                 [nm, "-D", "--undefined-only", str(path)],
-                capture_output=True, text=True, check=False,
+                capture_output=True, text=True, check=False, env=clean_env(),
+                stdin=subprocess.DEVNULL, timeout=120,
             ).stdout
             for path in extensions
         )
@@ -264,6 +266,7 @@ def _runtime(sanitizer: str = "address") -> Path:
     name = {"address": "asan", "thread": "tsan"}[sanitizer]
     path = Path(subprocess.check_output(
         [compiler, f"-print-file-name=libclang_rt.{name}-x86_64.so"], text=True,
+        env=clean_env(),
     ).strip())
     if not path.is_file():
         major = llvm_major()
@@ -284,6 +287,7 @@ def _fuzzer_runtime(plugin: Path) -> Path:
     """The matching LLVM ASan+libFuzzer runtime for Atheris, built by numba-asan build."""
     result = subprocess.run(
         [sys.executable, "-c", "import atheris"], capture_output=True, check=False,
+        env=clean_env(), stdin=subprocess.DEVNULL, timeout=120,
     )
     if result.returncode:
         raise RuntimeError("--fuzz requires Atheris in this environment: pip install atheris")
@@ -310,6 +314,13 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
            undefined: bool = False, leaks: bool = False, fuzz: bool = False) -> int:
     if sys.platform != "linux" or platform.machine() != "x86_64":
         raise RuntimeError("This prototype currently supports Linux x86-64 only")
+    # Before running any tool: a foreign preloaded runtime is inherited by it.
+    if re.search(r"lib(clang_rt\.)?[atm]san|(asan|ubsan|ubsan_cxx)_with_fuzzer",
+                 os.environ.get("LD_PRELOAD", "")):
+        raise RuntimeError(
+            "Remove the sanitizer from LD_PRELOAD: numba-asan loads the matching "
+            "runtime itself (for Atheris, use --fuzz instead of preloading "
+            "Atheris's asan_with_fuzzer.so)")
     if not plugin.is_file():
         raise RuntimeError(f"Sanitizer plugin {plugin} is missing; run numba-asan build "
                            "first (or pass --plugin)")
@@ -332,12 +343,6 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
     # from debuginfod servers: network access that can stall reports.
     for environment in (os.environ, env):
         environment.pop("DEBUGINFOD_URLS", None)
-    if re.search(r"lib(clang_rt\.)?[atm]san|(asan|ubsan|ubsan_cxx)_with_fuzzer",
-                 env.get("LD_PRELOAD", "")):
-        raise RuntimeError(
-            "Remove the sanitizer from LD_PRELOAD: numba-asan loads the matching "
-            "runtime itself (for Atheris, use --fuzz instead of preloading "
-            "Atheris's asan_with_fuzzer.so)")
     executable = sys.executable
     if sanitizer == "memory":
         executable = str(plugin.with_name("numba-msan-python"))

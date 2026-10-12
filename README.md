@@ -159,7 +159,11 @@ guide:
   `merge_libfuzzer_sanitizer.sh` does), and `--fuzz` preloads it. Do **not**
   preload Atheris's own `asan_with_fuzzer.so`: it is from an older LLVM, does
   not match the JIT instrumentation, and on current kernels it can loop
-  endlessly printing `AddressSanitizer:DEADLYSIGNAL`. The launcher refuses it.
+  endlessly printing `AddressSanitizer:DEADLYSIGNAL`. The launcher refuses it
+  before running any tool. LLVM tools (`opt`, `llvm-nm`, `llvm-symbolizer`,
+  `clang`) are always run without `LD_PRELOAD`, with a timeout: an orphaned
+  `opt --version` that inherited such a runtime once wrote ~100 GB of
+  `DEADLYSIGNAL` lines to a log.
 - **Bytecode instrumentation.** `atheris.instrument_imports()` and
   `atheris.instrument_all()` rewrite Python bytecode, which Numba cannot
   compile. numba-asan records the original bytecode for everything Atheris
@@ -200,6 +204,74 @@ systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 -p TasksMax=64 \
 ```
 
 Or run in a container with `--memory`/`--pids-limit`.
+
+### Writing effective fuzz targets for Numba code
+
+These lessons come from fuzzing about 100 open-source Numba packages (Numba 0.68 /
+LLVM 22). Each fixes a way a target failed to find bugs or reported false
+ones. They apply whether a target is handwritten or generated.
+
+| Do | Why (what went wrong otherwise) |
+| --- | --- |
+| **Warm up before `atheris.Fuzz()`.** Call the public API once per type signature the target can produce: each dtype, ndim, contiguous vs. sliced (`A` layout), read-only vs. writable, `None` vs. value for optional arguments. | Disk caches are off under the sanitizer, and compiling instrumented JIT code takes seconds to minutes per package. Compilation inside an input exceeded `-timeout`, which libFuzzer reports as a false *timeout*. Inputs of 55-89 s were observed. |
+| **Generate few signatures.** Pick dtypes/layouts from a small fixed list matching the warm-up. | Every new signature is a compilation in the middle of fuzzing: slow inputs, low throughput, false timeouts. |
+| **Allow for import-time compilation.** Give startup (import + warm-up) its own budget, outside `-max_total_time`. | Packages compiling eager signatures at import took up to 13 min and 2.1 GiB to import under ASan. |
+| **Instrument only the product:** `with atheris.instrument_imports(include=["pkg"])`. Import NumPy/SciPy and other dependencies first, outside the block. | Without `include`, importing one package (via scikit-learn and SciPy) spent more than 3 minutes on bytecode instrumentation before the first input. |
+| **Name targets `fuzz_<pkg>.py`, never `<pkg>.py`.** | The script directory is on `sys.path`, so a target named like the package shadows it (circular-import failure). |
+| **Let sizes cross the kernels' fixed capacities cheaply.** Derive shapes from fuzzer integers and fill them with patterns, repeated blocks or tiling of real data. | A target spending one input bit per array element capped its inputs far below a kernel's fixed-size internal buffer, so overflows of that buffer could never be reached. |
+| **Pass `-len_control=0`** for targets that read choices from the input (`FuzzedDataProvider`). | libFuzzer grows inputs slowly: after 28k runs the length limit was still 21 bytes, so choices read late in an input were never exercised. |
+| **Pass `-use_value_profile=1`.** | A 4-byte magic compared in JIT code was missed in 2M runs for one seed without it, and found in 26k-221k runs with it. |
+| **Set `-rss_limit_mb` from the measured baseline**, at least 1-2 GiB above it (4096 is a safe default). Set `ASAN_OPTIONS=allocator_may_return_null=1`. | Sanitized processes start at 0.8-1.9 GiB with scientific dependencies loaded. With 2048, several packages reported false *OOM* findings. Without `allocator_may_return_null`, a mutated huge size aborts in the allocator instead of raising `MemoryError`. |
+| **Cap Numba's threads** (`NUMBA_NUM_THREADS=2`) for `parallel=True` kernels. | With the default thread count on a busy host, each fork/join of a `prange` loop made inputs take seconds, up to about 170 s. |
+| **Keep inputs fast: at least ~5 executions/s after warm-up.** Shrink per-input work: iterations, bootstrap counts, model sizes. | Runs of 24-217 executions per minute (resampling- and model-fitting APIs) explore almost nothing, but still look "clean". |
+| **Treat only deliberate rejections as handled:** an explicit `raise` in the product, or validation inside a dependency. Never catch `Exception` or Numba's `TypingError`; generate valid types instead. | A deliberate `ValueError` from a package's own validation was misreported as a crash. Broad catches would hide `IndexError`/`ZeroDivisionError` raised from JIT code, which are real robustness findings. |
+| **Do not stop at the first robustness finding.** Record implicit exceptions and keep fuzzing; let only sanitizer reports abort. | libFuzzer stops at the first crash, and shallow exceptions (empty inputs, zero sizes) would hide deeper memory errors. libFuzzer's `-fork` mode, which could continue past crashes, does not work under `numba-asan run --fuzz` yet. |
+| **Fuzz unvalidated parameter values too** (negative sizes, empty arrays, the endpoints of documented ranges). | Unchecked indexing in JIT code is commonly reached through parameters a package never validates, and through boundary values its documentation allows. Fuzzing only typical values misses both. |
+| **With `numba-asan build-deps`, prefer the ASan-only build** unless the dependencies themselves are under test. | Coverage-instrumented NumPy/Numba add ~330k counters that dilute guidance away from the JIT code (221k vs. 26k runs for the same bug). |
+
+A minimal skeleton:
+
+```python
+import sys
+import atheris
+import numpy as np                      # dependencies: not instrumented
+
+with atheris.instrument_imports(include=["mypkg"]):
+    import mypkg
+
+DTYPES = (np.float64, np.int64)          # few signatures
+
+def warm_up():
+    for dtype in DTYPES:                  # every signature the target generates
+        mypkg.public_function(np.arange(8, dtype=dtype), 3)
+
+def TestOneInput(data):
+    fdp = atheris.FuzzedDataProvider(data)
+    n = fdp.ConsumeIntInRange(0, 1 << 18)            # can cross fixed capacities
+    block = np.asarray(fdp.ConsumeFloatList(16) or [0.0])
+    values = np.resize(block, n).astype(fdp.PickValueInList(DTYPES))
+    window = fdp.ConsumeIntInRange(-8, 300)          # includes unvalidated values
+    try:
+        result = mypkg.public_function(values, window)
+    except ValueError:                    # only if mypkg raises it deliberately
+        return
+    assert result.shape == values.shape   # documented invariants only
+
+if __name__ == "__main__":
+    warm_up()
+    atheris.Setup(sys.argv, TestOneInput)
+    atheris.Fuzz()
+```
+
+```sh
+NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1 \
+  .venv/bin/numba-asan run --fuzz fuzz_mypkg.py corpus/ -max_total_time=600 \
+  -rss_limit_mb=4096 -timeout=60 -use_value_profile=1 -len_control=0
+```
+
+To avoid writing targets at all, generate them from existing tests. The
+integration corpus's `numba_autofuzz` records the public-API calls its tests
+make, then replays and mutates them with these defaults built in.
 
 ## What is implemented
 

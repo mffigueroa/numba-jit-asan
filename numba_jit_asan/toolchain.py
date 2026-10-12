@@ -5,6 +5,7 @@ version that llvmlite embeds, and the private Numba hooks are only validated
 for these exact releases.
 """
 from importlib import metadata
+import os
 import re
 import shutil
 import subprocess
@@ -38,6 +39,18 @@ def llvm_major(numba_version: str | None = None, llvmlite_version: str | None = 
     return SUPPORTED[key]
 
 
+def clean_env(base=None) -> dict:
+    """Environment for LLVM tools: never with a sanitizer runtime preloaded.
+
+    Tools are uninstrumented. A foreign sanitizer runtime (for example
+    Atheris's prebuilt one) preloaded into them can loop endlessly printing
+    DEADLYSIGNAL, and a matching one only adds overhead.
+    """
+    env = dict(os.environ if base is None else base)
+    env.pop("LD_PRELOAD", None)
+    return env
+
+
 def tool_name(name: str) -> str:
     return f"{name}-{llvm_major()}"
 
@@ -53,7 +66,10 @@ def tool(name: str) -> str:
     path = shutil.which(versioned)
     if path is None:
         raise RuntimeError(f"Missing {versioned}; install the LLVM {major} toolchain")
-    version = subprocess.check_output([path, "--version"], text=True)
+    version = subprocess.run(
+        [path, "--version"], env=clean_env(), stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60, check=True,
+    ).stdout
     if not re.search(rf"\b(?:version )?{major}\.", version):
         raise RuntimeError(f"Expected LLVM {major}: {path}\n{version}")
     return path

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 
-from helpers import ROOT, SanitizerTestCase, source_line
+from helpers import ROOT, SanitizerTestCase, run_bounded, source_line
 from numba_jit_asan.runner import DEFAULT_PLUGIN, instrumented_dependencies
 from numba_jit_asan.toolchain import tool_name
 
@@ -39,9 +39,9 @@ class AtherisTests(SanitizerTestCase):
                    *FUZZ_LIMITS, f"-artifact_prefix={directory}/", *flags]
         log = directory / "output.log"
         with log.open("wb") as output:
-            result = subprocess.run(command, cwd=directory, env=environment,
-                                    stdout=output, stderr=subprocess.STDOUT,
-                                    timeout=timeout)
+            result = run_bounded(command, cwd=directory, env=environment,
+                                 stdout=output, stderr=subprocess.STDOUT,
+                                 timeout=timeout)
         with log.open("rb") as output:
             text = output.read(OUTPUT_LIMIT).decode(errors="replace")
         self.assertNotIn("DEADLYSIGNAL", text)

@@ -7,6 +7,8 @@ import uuid
 import warnings
 import weakref
 
+from .toolchain import clean_env
+
 
 SANITIZERS = {
     # name: (runtime probe symbol, LLVM pipeline, constructor prefix)
@@ -20,6 +22,8 @@ def _run_opt(opt, plugin, pipeline, module_text, name):
     result = subprocess.run(
         [opt, f"-load-pass-plugin={plugin}", f"-passes={pipeline}", "-S", "-o", "-"],
         input=module_text, text=True, capture_output=True, check=False,
+        # This runs inside the sanitized process: opt needs no sanitizer runtime.
+        env=clean_env(),
     )
     if result.returncode:
         raise RuntimeError(f"LLVM {pipeline} instrumentation failed for {name}:\n"
