@@ -145,11 +145,38 @@ def _installer() -> list[str]:
     return [uv, "pip", "install", "--no-cache", "--python", sys.executable]
 
 
-def build_dependencies(fuzzer: bool = False) -> None:
+def _wheel_builder() -> list[str]:
+    """``pip wheel`` for this interpreter (pip is added to uv-created environments)."""
+    import importlib.util
+
+    if importlib.util.find_spec("pip") is None:
+        subprocess.run([*_installer(), "pip"], check=True)
+    return [sys.executable, "-m", "pip", "wheel", "--no-cache-dir", "--no-deps"]
+
+
+# Source-build options per dependency.
+_BUILD_OPTIONS = {
+    "numpy": ["-Csetup-args=-Db_sanitize=address",
+              # No external BLAS: NumPy's own (instrumented) fallback loops are used.
+              "-Csetup-args=-Dallow-noblas=true",
+              "-Csetup-args=-Dblas=none", "-Csetup-args=-Dlapack=none"],
+    "numba": [],
+}
+
+
+def _find_wheel(directory: Path, name: str, version: str) -> Path | None:
+    tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    matches = sorted(directory.glob(f"{name}-{version}-{tag}-*.whl"))
+    return matches[0] if matches else None
+
+
+def build_dependencies(fuzzer: bool = False, wheelhouse: Path | None = None) -> None:
     """Rebuild the installed NumPy and Numba releases with ASan in this environment.
 
     With *fuzzer*, also add libFuzzer coverage (``-fsanitize=fuzzer-no-link``),
-    as Atheris requires for native extensions.
+    as Atheris requires for native extensions. With *wheelhouse*, the
+    instrumented wheels are cached there per LLVM version and sanitizer flavor
+    and reused by later environments with the same versions and Python.
     """
     from importlib import metadata
 
@@ -167,21 +194,34 @@ def build_dependencies(fuzzer: bool = False) -> None:
     )
     # Build tools and Python code run during the build; never sanitize the pip process.
     env.pop("LD_PRELOAD", None)
-    pip = [*_installer(), "--force-reinstall", "--no-deps"]
-    subprocess.run(
-        [*pip, "--no-binary", "numpy",
-         f"numpy=={versions['numpy']}",
-         "-Csetup-args=-Db_sanitize=address",
-         # No external BLAS: NumPy's own (instrumented) fallback loops are used.
-         "-Csetup-args=-Dallow-noblas=true",
-         "-Csetup-args=-Dblas=none", "-Csetup-args=-Dlapack=none"],
-        env=env, check=True,
-    )
-    subprocess.run(
-        [*pip, "--no-binary", "numba",
-         f"numba=={versions['numba']}"],
-        env=env, check=True,
-    )
+    flavor = f"llvm{llvm_major()}-{sanitizers.replace(',', '-')}"
+    with tempfile.TemporaryDirectory(prefix="numba-asan-wheels-") as scratch:
+        cache = Path(wheelhouse).resolve() / flavor if wheelhouse else Path(scratch)
+        cache.mkdir(parents=True, exist_ok=True)
+        wheels = []
+        for name in INSTRUMENTED_DEPENDENCIES:
+            wheel = _find_wheel(cache, name, versions[name])
+            if wheel is not None:
+                print(f"Using cached instrumented wheel {wheel}")
+            else:
+                staging = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=cache))
+                try:
+                    subprocess.run(
+                        [*_wheel_builder(), "--no-binary", name, "-w", str(staging),
+                         f"{name}=={versions[name]}", *_BUILD_OPTIONS[name]],
+                        env=env, check=True,
+                    )
+                    built = _find_wheel(staging, name, versions[name])
+                    if built is None:
+                        raise RuntimeError(f"Building {name}=={versions[name]} produced no wheel")
+                    wheel = cache / built.name
+                    # Atomic within the cache: concurrent builders never see partial wheels.
+                    os.replace(built, wheel)
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+            wheels.append(wheel)
+        subprocess.run([*_installer(), "--force-reinstall", "--no-deps", *map(str, wheels)],
+                       env=env, check=True)
     checks = {"ASan": "__asan_init"}
     if fuzzer:
         checks["fuzzer coverage"] = "__sanitizer_cov_8bit_counters_init"
@@ -396,6 +436,8 @@ def main() -> None:
     )
     deps.add_argument("--fuzzer", action="store_true",
                       help="also add libFuzzer coverage (-fsanitize=fuzzer-no-link) for Atheris")
+    deps.add_argument("--wheelhouse", type=Path,
+                      help="cache the instrumented wheels here and reuse them when present")
     run = commands.add_parser("run", help="run a Python script or -m module under a sanitizer")
     run.add_argument("--plugin", type=Path, default=DEFAULT_PLUGIN)
     run.add_argument("--sanitizer", choices=("address", "thread", "memory"),
@@ -412,7 +454,7 @@ def main() -> None:
         if args.command == "build":
             build_plugin(args.output)
         elif args.command == "build-deps":
-            build_dependencies(fuzzer=args.fuzzer)
+            build_dependencies(fuzzer=args.fuzzer, wheelhouse=args.wheelhouse)
         else:
             target = args.target
             if target and target[0] == "--":

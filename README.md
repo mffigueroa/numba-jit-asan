@@ -172,6 +172,11 @@ guide:
 Usage notes:
 
 - Use `--fuzz` both to fuzz and to reproduce: `numba-asan run --fuzz harness.py crash-<hash>`.
+- Pass `-use_value_profile=1` for magic values and other comparison-guarded
+  JIT branches. Without it, discovery depends on the seed, and it gets less
+  likely when instrumented NumPy/Numba share the coverage map. In one test,
+  seed 1 missed a 4-byte magic in 2M runs without it, and found it in
+  221k runs with it.
 - `--fuzz --undefined` adds the UBSan checks.
 - With `-fork`, call your target once before `atheris.Fuzz()` (for example
   `TestOneInput(b"")`): the fork-mode parent only tracks coverage of JIT code
@@ -331,6 +336,19 @@ bridge with ASan, and can rebuild NumPy and Numba:
 ```sh
 .venv/bin/numba-asan build-deps   # reinstalls the installed numpy/numba versions from source
 ```
+
+To reuse the builds across environments (for example one disposable venv per
+CI job), cache the instrumented wheels:
+
+```sh
+.venv/bin/numba-asan build-deps --wheelhouse ~/numba-asan-wheels   # ~3 min once, then seconds
+```
+
+Wheels are cached per LLVM major and sanitizer flavor (`llvm22-address/`,
+`llvm22-address-fuzzer-no-link/`), and matched by package version and Python
+tag. The instrumentation check runs after every install, cached or not.
+In environments created by uv, which have no pip, pip is installed to build
+the wheels.
 
 This compiles every NumPy and Numba extension module with the matching Clang and
 `-fsanitize=address` (verified afterwards by checking each `.so` for ASan

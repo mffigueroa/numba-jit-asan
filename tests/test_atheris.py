@@ -69,7 +69,10 @@ class AtherisTests(SanitizerTestCase):
     def test_finds_comparison_guarded_jit_bug_and_reproduces_it(self):
         # A 4-byte magic compared inside JIT code: found only through JIT
         # coverage and comparison tracing (2**32 guesses otherwise).
-        code, output, directory = self.fuzz("parse", "-runs=2000000", "-max_total_time=150")
+        # Value profiling makes discovery robust to the seed and to how many
+        # other modules (instrumented NumPy/Numba) share the coverage map.
+        code, output, directory = self.fuzz("parse", "-runs=2000000", "-max_total_time=150",
+                                            "-use_value_profile=1")
         self.assert_overflow(code, output, "__main__::parse", CASES, "# atheris: magic overflow")
         self.assertRegex(output, r"INITED cov: \d+")
         crashes = self.artifacts(directory, "crash")
