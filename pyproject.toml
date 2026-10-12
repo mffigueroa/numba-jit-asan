@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Experimental real AddressSanitizer instrumentation for Numba CPU JIT code"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numba==0.62.1", "llvmlite==0.45.1"]
+# Validated pairs only (see numba_jit_asan/toolchain.py); others are rejected at runtime.
+dependencies = ["numba>=0.62.1,<0.69", "llvmlite>=0.45.1,<0.51"]
 
 [project.optional-dependencies]
 fuzz = ["atheris==3.1.0"]

@@ -15,9 +15,9 @@ class UndefinedBehaviorTests(SanitizerTestCase):
     def run_ub(self, case, *args):
         return self.run_case(case, script=CASES, args=("--undefined", *args))
 
-    def assert_ub(self, result, message, function, marker):
+    def assert_ub(self, result, message, function, marker, location=None):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertRegex(result.stderr, rf"{CASES}:\d+:\d+: runtime error: {message}")
+        self.assertRegex(result.stderr, rf"{location or CASES}:\d+:\d+: runtime error: {message}")
         self.assert_jit_frame(result, function, CASES, marker)
 
     def test_shift_out_of_bounds(self):
@@ -31,9 +31,12 @@ class UndefinedBehaviorTests(SanitizerTestCase):
         self.assert_ub(self.run_ub("ub_cast"),
                        r"1e\+300 is outside the range of representable values of type 'int32'",
                        "__main__::to_int32", "# ubsan: float to int32")
+        # Numba 0.68 compiles int() as a separate @overload: the cast is reported
+        # in numba/cpython/builtins.py, with the caller's line in the next frame.
         self.assert_ub(self.run_ub("ub_nan"),
                        "nan is outside the range of representable values of type 'int64'",
-                       "__main__::to_int64", "# ubsan: float to int64")
+                       "__main__::to_int64", "# ubsan: float to int64",
+                       location=rf"(?:{CASES}|\S+/numba/cpython/builtins\.py)")
 
     def test_in_range_operations_are_clean(self):
         result = self.run_ub("ub_safe")

@@ -14,6 +14,7 @@ import unittest
 
 from helpers import ROOT, SanitizerTestCase, source_line
 from numba_jit_asan.runner import DEFAULT_PLUGIN, instrumented_dependencies
+from numba_jit_asan.toolchain import tool_name
 
 CASES = ROOT / "tests" / "atheris_cases.py"
 MODULE = ROOT / "tests" / "atheris_module.py"
@@ -127,7 +128,10 @@ class AtherisTests(SanitizerTestCase):
         import atheris
 
         runtime = Path(atheris.path()) / "asan_with_fuzzer.so"
-        code, output, _ = self.fuzz("parse", "-runs=10", env={"LD_PRELOAD": str(runtime)})
+        # The preloaded runtime also sanitizes the launcher's interpreter; its
+        # exit-time leak report (CPython-build dependent) would change the exit code.
+        code, output, _ = self.fuzz("parse", "-runs=10", env={
+            "LD_PRELOAD": str(runtime), "ASAN_OPTIONS": "detect_leaks=0"})
         self.assertEqual(code, 2, output)
         self.assertIn("use --fuzz instead of preloading", output)
 
@@ -135,7 +139,7 @@ class AtherisTests(SanitizerTestCase):
 class FuzzerRuntimeTests(unittest.TestCase):
     def test_runtime_matches_jit_instrumentation(self):
         runtime = DEFAULT_PLUGIN.with_name("asan_with_fuzzer.so")
-        symbols = subprocess.run(["llvm-nm-20", "-D", "--defined-only", str(runtime)],
+        symbols = subprocess.run([tool_name("llvm-nm"), "-D", "--defined-only", str(runtime)],
                                  capture_output=True, text=True, check=True).stdout
         for symbol in ("LLVMFuzzerRunDriver", "__asan_version_mismatch_check_v8",
                        "__sanitizer_cov_8bit_counters_init", "__sanitizer_cov_pcs_init",

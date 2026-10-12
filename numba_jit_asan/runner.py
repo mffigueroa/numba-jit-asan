@@ -12,25 +12,13 @@ import sysconfig
 import tempfile
 
 from .symbolize import FrameMap, rewrite
+from .toolchain import llvm_major, tool as _tool, which as which_tool
 
 
 # Per environment: artifacts must match this environment's Numba/LLVM, and
 # `numba-asan run` then works from any directory.
 DEFAULT_PLUGIN = (Path(os.environ["NUMBA_ASAN_BUILD_DIR"]) if os.environ.get("NUMBA_ASAN_BUILD_DIR")
                   else Path(sys.prefix) / "share" / "numba-jit-asan") / "numba_asan_pass.so"
-
-
-def _tool(name: str) -> str:
-    path = shutil.which(name)
-    if path is None:
-        raise RuntimeError(f"Missing {name}; install the LLVM 20 toolchain")
-    return path
-
-
-def _llvm20(tool: str) -> None:
-    version = subprocess.check_output([tool, "--version"], text=True)
-    if not re.search(r"\b(?:version )?20\.", version):
-        raise RuntimeError(f"Expected LLVM 20: {tool}\n{version}")
 
 
 def _numpy_include() -> Path:
@@ -52,10 +40,8 @@ def _numpy_include() -> Path:
 
 
 def build_plugin(output: Path) -> None:
-    config = _tool("llvm-config-20")
-    compiler = _tool("clang++-20")
-    _llvm20(config)
-    _llvm20(compiler)
+    config = _tool("llvm-config")
+    compiler = _tool("clang++")
     flags = shlex.split(subprocess.check_output(
         [config, "--cxxflags", "--ldflags", "--system-libs", "--libs",
          "passes", "instrumentation"], text=True,
@@ -86,11 +72,12 @@ FUZZER_RUNTIME = "asan_with_fuzzer.so"
 
 
 def _build_fuzzer_runtime(compiler: str, directory: Path) -> None:
-    """LLVM 20 ASan runtime with libFuzzer linked in, for Atheris.
+    """LLVM ASan runtime with libFuzzer linked in, for Atheris.
 
     Mirrors Atheris's setup_utils/merge_libfuzzer_sanitizer.sh, but uses the
-    same LLVM release as the JIT instrumentation. Atheris's prebuilt runtime is
-    older; on current kernels it can loop endlessly printing DEADLYSIGNAL.
+    same LLVM release as llvmlite and the JIT instrumentation. Atheris's
+    prebuilt runtime is older; on current kernels it can loop endlessly
+    printing DEADLYSIGNAL.
     """
     linux = Path(subprocess.check_output(
         [compiler, "-print-file-name=libclang_rt.asan-x86_64.a"], text=True,
@@ -98,7 +85,7 @@ def _build_fuzzer_runtime(compiler: str, directory: Path) -> None:
     asan = linux / "libclang_rt.asan-x86_64.a"
     fuzzer = linux / "libclang_rt.fuzzer_no_main-x86_64.a"
     if not asan.is_file() or not fuzzer.is_file():
-        print("Skipped Atheris runtime: install libclang-rt-20-dev")
+        print(f"Skipped Atheris runtime: install libclang-rt-{llvm_major()}-dev")
         return
     output = directory / FUZZER_RUNTIME
     with tempfile.TemporaryDirectory() as scratch:
@@ -143,18 +130,32 @@ def _build_msan(compiler: str, directory: Path) -> None:
     print(f"Built {executable.resolve()}")
 
 
-INSTRUMENTED_DEPENDENCIES = {"numpy": "2.3.5", "numba": "0.62.1"}
+INSTRUMENTED_DEPENDENCIES = ("numpy", "numba")
+
+
+def _installer() -> list[str]:
+    """pip for this interpreter; uv-created environments have no pip module."""
+    import importlib.util
+
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "--no-cache-dir"]
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("build-deps needs pip or uv for this environment")
+    return [uv, "pip", "install", "--no-cache", "--python", sys.executable]
 
 
 def build_dependencies(fuzzer: bool = False) -> None:
-    """Rebuild NumPy and Numba native code with ASan in this environment.
+    """Rebuild the installed NumPy and Numba releases with ASan in this environment.
 
     With *fuzzer*, also add libFuzzer coverage (``-fsanitize=fuzzer-no-link``),
     as Atheris requires for native extensions.
     """
-    compiler = _tool("clang-20")
-    compiler_cxx = _tool("clang++-20")
-    _llvm20(compiler)
+    from importlib import metadata
+
+    compiler = _tool("clang")
+    compiler_cxx = _tool("clang++")
+    versions = {name: metadata.version(name) for name in INSTRUMENTED_DEPENDENCIES}
     sanitizers = "address,fuzzer-no-link" if fuzzer else "address"
     flags = f"-fsanitize={sanitizers} -fno-omit-frame-pointer -g"
     env = os.environ.copy()
@@ -166,11 +167,10 @@ def build_dependencies(fuzzer: bool = False) -> None:
     )
     # Build tools and Python code run during the build; never sanitize the pip process.
     env.pop("LD_PRELOAD", None)
-    pip = [sys.executable, "-m", "pip", "install", "--no-cache-dir",
-           "--force-reinstall", "--no-deps"]
+    pip = [*_installer(), "--force-reinstall", "--no-deps"]
     subprocess.run(
         [*pip, "--no-binary", "numpy",
-         f"numpy=={INSTRUMENTED_DEPENDENCIES['numpy']}",
+         f"numpy=={versions['numpy']}",
          "-Csetup-args=-Db_sanitize=address",
          # No external BLAS: NumPy's own (instrumented) fallback loops are used.
          "-Csetup-args=-Dallow-noblas=true",
@@ -179,7 +179,7 @@ def build_dependencies(fuzzer: bool = False) -> None:
     )
     subprocess.run(
         [*pip, "--no-binary", "numba",
-         f"numba=={INSTRUMENTED_DEPENDENCIES['numba']}"],
+         f"numba=={versions['numba']}"],
         env=env, check=True,
     )
     checks = {"ASan": "__asan_init"}
@@ -200,7 +200,7 @@ def instrumented_dependencies(symbol: str = "__asan_init") -> dict[str, bool]:
     """
     import importlib.util
 
-    nm = _tool("llvm-nm-20")
+    nm = _tool("llvm-nm")
     result = {}
     for name in INSTRUMENTED_DEPENDENCIES:
         spec = importlib.util.find_spec(name)
@@ -220,14 +220,14 @@ def instrumented_dependencies(symbol: str = "__asan_init") -> dict[str, bool]:
 
 
 def _runtime(sanitizer: str = "address") -> Path:
-    compiler = _tool("clang-20")
-    _llvm20(compiler)
+    compiler = _tool("clang")
     name = {"address": "asan", "thread": "tsan"}[sanitizer]
     path = Path(subprocess.check_output(
         [compiler, f"-print-file-name=libclang_rt.{name}-x86_64.so"], text=True,
     ).strip())
     if not path.is_file():
-        raise RuntimeError(f"Missing LLVM 20 {name} runtime; install libclang-rt-20-dev")
+        major = llvm_major()
+        raise RuntimeError(f"Missing LLVM {major} {name} runtime; install libclang-rt-{major}-dev")
     return path.resolve()
 
 
@@ -241,7 +241,7 @@ def _prepend(env: dict, name: str, options: str) -> None:
 
 
 def _fuzzer_runtime(plugin: Path) -> Path:
-    """The LLVM 20 ASan+libFuzzer runtime for Atheris, built by numba-asan build."""
+    """The matching LLVM ASan+libFuzzer runtime for Atheris, built by numba-asan build."""
     result = subprocess.run(
         [sys.executable, "-c", "import atheris"], capture_output=True, check=False,
     )
@@ -280,8 +280,7 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
     if fuzz and (sanitizer != "address" or leaks):
         raise RuntimeError("--fuzz uses Atheris's ASan runtime; use libFuzzer's "
                            "-detect_leaks instead of --leaks")
-    opt = _tool("opt-20")
-    _llvm20(opt)
+    opt = _tool("opt")
     if sanitizer != "address" and any(instrumented_dependencies().values()):
         raise RuntimeError(
             f"NumPy/Numba in this environment were rebuilt with ASan by build-deps; "
@@ -289,6 +288,10 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
             "Use a separate environment with stock wheels for TSan/MSan."
         )
     env = os.environ.copy()
+    # llvm-symbolizer would otherwise fetch debug info for system libraries
+    # from debuginfod servers: network access that can stall reports.
+    for environment in (os.environ, env):
+        environment.pop("DEBUGINFOD_URLS", None)
     if re.search(r"lib(clang_rt\.)?[atm]san|(asan|ubsan|ubsan_cxx)_with_fuzzer",
                  env.get("LD_PRELOAD", "")):
         raise RuntimeError(
@@ -335,6 +338,13 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
     jit_directory.mkdir(parents=True, exist_ok=True)
     env["NUMBA_SANITIZER_JIT_DIR"] = str(jit_directory)
     options = _OPTIONS[sanitizer]
+    symbolizer = which_tool("llvm-symbolizer")
+    if symbolizer:
+        # Some distributions' runtimes look only for a fixed /usr/bin path;
+        # use the symbolizer matching this LLVM toolchain unless one is set.
+        for name in dict.fromkeys((options, "UBSAN_OPTIONS")):
+            if "external_symbolizer_path=" not in env.get(name, ""):
+                _prepend(env, name, f"external_symbolizer_path={symbolizer}")
     capture = not any("log_path=" in env.get(name, "") for name in
                       (options, "UBSAN_OPTIONS", "LSAN_OPTIONS"))
     reports = Path(owned.name) / "report"
@@ -378,7 +388,7 @@ def main() -> None:
         description="Run real LLVM AddressSanitizer on Numba CPU JIT code (plus TSan, MSan, UBSan and LSan modes)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    build = commands.add_parser("build", help="build the LLVM 20 ASan pass plugin")
+    build = commands.add_parser("build", help="build the sanitizer pass plugin with llvmlite's LLVM version")
     build.add_argument("--output", type=Path, default=DEFAULT_PLUGIN)
     deps = commands.add_parser(
         "build-deps",

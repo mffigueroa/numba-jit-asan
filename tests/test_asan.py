@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from helpers import CASES, ROOT, SanitizerTestCase
+from numba_jit_asan.toolchain import tool_name
 
 
 class AddressSanitizerTests(SanitizerTestCase):
@@ -16,7 +17,7 @@ class AddressSanitizerTests(SanitizerTestCase):
         for instrumented in (False, True):
             path = Path(cls.native_directory.name) / f"native_{instrumented}.so"
             command = [
-                "clang++-20", "-shared", "-fPIC", "-g", "-O1",
+                tool_name("clang++"), "-shared", "-fPIC", "-g", "-O1",
                 str(ROOT / "tests" / "native_access.cpp"), "-o", str(path),
             ]
             if instrumented:

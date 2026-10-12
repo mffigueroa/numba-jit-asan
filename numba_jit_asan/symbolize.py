@@ -3,8 +3,9 @@ import bisect
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import shutil
 import subprocess
+
+from . import toolchain
 
 _FRAME = re.compile(r"^(?P<indent>\s*)#(?P<index>\d+) (?P<body>.*)$")
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]+")
@@ -37,8 +38,8 @@ class FrameMap:
         frames.sort(key=lambda frame: frame.start)
         self.frames = frames
         self.starts = [frame.start for frame in frames]
-        self.symbolizer = shutil.which("llvm-symbolizer-20")
-        self.demangler = shutil.which("llvm-cxxfilt-20")
+        self.symbolizer = toolchain.which("llvm-symbolizer")
+        self.demangler = toolchain.which("llvm-cxxfilt")
         self._cache = {}
 
     def find(self, pc: int):

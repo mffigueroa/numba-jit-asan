@@ -49,10 +49,11 @@ def enable(*, opt: str, plugin: Path, sanitizer: str = "address",
     import numba
     from numba.core import caching, codegen
 
-    if (numba.__version__, llvmlite.__version__) != ("0.62.1", "0.45.1"):
-        raise RuntimeError("This prototype requires Numba 0.62.1 / llvmlite 0.45.1")
-    if llvm.llvm_version_info[0] != 20:
-        raise RuntimeError("This prototype requires llvmlite built with LLVM 20")
+    from .toolchain import llvm_major
+
+    major = llvm_major(numba.__version__, llvmlite.__version__)
+    if llvm.llvm_version_info[0] != major:
+        raise RuntimeError(f"This prototype requires llvmlite built with LLVM {major}")
     if not plugin.is_file():
         raise RuntimeError(f"Missing sanitizer pass plugin: {plugin}")
 

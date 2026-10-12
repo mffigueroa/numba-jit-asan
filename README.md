@@ -21,23 +21,35 @@ Python's usual memory-safety guarantees do not apply to those native accesses.
 The Numba option is spelled `boundscheck`, not `bounds_check`.
 
 **Status:** working proof of concept, not production-ready or comprehensive
-memory-safety coverage. Tested on Linux x86-64, CPython 3.12.3, NumPy 2.3.5,
-Numba 0.62.1, llvmlite 0.45.1 (embedded LLVM 20.1.8), and external LLVM 20.1.2.
-The Python compiler dependencies are deliberately pinned because this package
-uses private Numba hooks. Other versions/platforms need validation.
+memory-safety coverage. Tested on Linux x86-64 and CPython 3.12 with two
+validated Numba releases, each needing the external LLVM toolchain matching the
+LLVM that its llvmlite embeds:
+
+| Numba | llvmlite (embedded LLVM) | NumPy tested | External toolchain |
+| --- | --- | --- | --- |
+| 0.62.1 | 0.45.1 (20.1.8) | 2.3.5 | LLVM 20 (`clang-20`, `opt-20`, ...) |
+| 0.68.0 | 0.50.0 (22.1.0) | 2.5.4 | LLVM 22 (`clang-22`, `opt-22`, ...) |
+
+`numba-asan` selects the `-20`/`-22` tools from the installed Numba/llvmlite
+pair ([toolchain.py](numba_jit_asan/toolchain.py)) and refuses any other pair,
+because it uses private Numba hooks. Other versions/platforms need validation.
 
 ## Quick start
 
-On Ubuntu 24.04 with LLVM 20 packages available:
+On Ubuntu 24.04 with LLVM 20 packages available (Numba 0.62.1):
 
 ```sh
 sudo apt-get install llvm-20-dev clang-20 libclang-rt-20-dev python3-dev
 python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install -e . numba==0.62.1 llvmlite==0.45.1
 .venv/bin/numba-asan build
 .venv/bin/numba-asan run examples/safe.py
 .venv/bin/numba-asan run examples/heap_overflow.py
 ```
+
+For Numba 0.68.0, install the LLVM 22 equivalents (`llvm-22-dev clang-22
+libclang-rt-22-dev`, from Ubuntu 26.04 or [apt.llvm.org](https://apt.llvm.org)
+on 24.04) and `numba==0.68.0 llvmlite==0.50.0`.
 
 The overflow example intentionally terminates with a nonzero exit code:
 
@@ -82,6 +94,11 @@ Numba/LLVM. `numba-asan run` then works from any directory. Set
 Enable this at **process startup**, before application code imports Numba.
 Merely setting `LD_PRELOAD` to ASan does **not** instrument JIT instructions;
 the regression tests demonstrate that distinction.
+
+`numba-asan run` points the sanitizers at the matching `llvm-symbolizer-<N>`
+(unless `external_symbolizer_path` is already set) and unsets `DEBUGINFOD_URLS`:
+symbolizing system libraries must not fetch debug info over the network, which
+can also stall reports indefinitely.
 
 Do not use this on production workloads. Sanitizer runtimes are debugging
 tools, introduce overhead, and are not designed as a security hardening layer.
@@ -137,7 +154,7 @@ guide:
   `-fsanitize=fuzzer-no-link` (edge counters, PC tables, comparison and
   indirect-call tracing) on top of ASan. Without it, libFuzzer cannot see
   branches inside `@njit` functions; the magic above would take ~2³² guesses.
-- **Matching runtime.** `numba-asan build` links LLVM 20's ASan runtime with
+- **Matching runtime.** `numba-asan build` links the matching LLVM's ASan runtime with
   libFuzzer into `asan_with_fuzzer.so` (as Atheris's
   `merge_libfuzzer_sanitizer.sh` does), and `--fuzz` preloads it. Do **not**
   preload Atheris's own `asan_with_fuzzer.so`: it is from an older LLVM, does
@@ -312,10 +329,10 @@ NumPy, BLAS, or other extension binary. This package builds its own native
 bridge with ASan, and can rebuild NumPy and Numba:
 
 ```sh
-.venv/bin/numba-asan build-deps   # reinstalls numpy 2.3.5 / numba 0.62.1 from source
+.venv/bin/numba-asan build-deps   # reinstalls the installed numpy/numba versions from source
 ```
 
-This compiles every NumPy and Numba extension module with Clang 20 and
+This compiles every NumPy and Numba extension module with the matching Clang and
 `-fsanitize=address` (verified afterwards by checking each `.so` for ASan
 symbols). Consequences:
 
@@ -330,7 +347,7 @@ symbols). Consequences:
 For another C/C++ shared library, the essential build pattern is:
 
 ```sh
-clang++-20 -shared -fPIC -g -O1 -fsanitize=address \
+clang++-22 -shared -fPIC -g -O1 -fsanitize=address \
     -fno-omit-frame-pointer your_library.cpp -o your_library.so
 ```
 
@@ -452,7 +469,8 @@ from numba_jit_asan.leaks import check
 check()  # raises numba_jit_asan.leaks.LeakError if anything is unreachable
 ```
 
-Known compiler-internal leaks in `libllvmlite.so` are suppressed
+Known compiler-internal leaks in `libllvmlite.so` and CPython frame objects
+created for stack introspection are suppressed
 ([lsan.supp](numba_jit_asan/lsan.supp)). Leaks are reported only for
 allocations that are unreachable; a leaked object still referenced from a
 live global or cache is not detected, and conservative scanning can treat
@@ -543,12 +561,13 @@ symbolizers (MCJIT TLS relocation support would remove the MSan getters).
 ## CI and distribution
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes, pull requests and
-manual dispatch. Ubuntu 24.04 installs LLVM 20 and Python development headers,
+manual dispatch, once per validated Numba release. Ubuntu 24.04 installs the
+matching LLVM (20 from Ubuntu, 22 from apt.llvm.org) and Python development headers,
 installs Atheris, builds the plugin, bridges, Atheris runtime and MSan
 launcher, and runs the full regression suite (ASan, UBSan, LSan, TSan, MSan,
 Atheris) twice: with stock NumPy/Numba wheels and after
 `numba-asan build-deps --fuzzer`. The second job asserts that the dependencies
-really carry ASan and fuzzer coverage. The stock job builds and uploads the Python wheel.
+really carry ASan and fuzzer coverage. The stock Numba 0.68.0 job builds and uploads the Python wheel.
 Intentionally failing sanitizer cases are subprocess tests whose expected
 failures are asserted by the test runner.
 
@@ -567,4 +586,5 @@ release policy and packaging review should be configured separately.
 - [llvmlite 0.45.1 release notes / LLVM 20 transition](https://llvmlite.readthedocs.io/en/v0.45.1/release-notes.html)
 - [Numba 0.62.1 codegen](https://github.com/numba/numba/blob/0.62.1/numba/core/codegen.py)
 - [Numba 0.62.1 NRT allocator](https://github.com/numba/numba/blob/0.62.1/numba/core/runtime/nrt.cpp)
+- [Numba 0.68.0 codegen](https://github.com/numba/numba/blob/0.68.0/numba/core/codegen.py)
 - [NumPy data memory policies and caches](https://numpy.org/doc/stable/reference/c-api/data_memory.html)

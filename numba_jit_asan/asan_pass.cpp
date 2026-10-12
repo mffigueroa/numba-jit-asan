@@ -8,8 +8,13 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ReplaceConstant.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Passes/PassBuilder.h"
+#if LLVM_VERSION_MAJOR >= 22
+#include "llvm/Plugins/PassPlugin.h"
+#else
 #include "llvm/Passes/PassPlugin.h"
+#endif
 #include "llvm/Support/Path.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/MemorySanitizer.h"

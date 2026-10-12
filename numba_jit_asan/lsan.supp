@@ -1,3 +1,7 @@
 # Known leaks in llvmlite pass-builder bindings (compiler internals, not
 # JIT-compiled user code, which never executes from libllvmlite.so frames).
 leak:libllvmlite.so
+# CPython frame objects created for stack introspection (f_back); interpreter
+# state, sometimes unreachable to the scan in some CPython builds (for example
+# python-build-standalone). JIT-compiled code never allocates these.
+leak:_PyFrame_MakeAndSetFrameObject

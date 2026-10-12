@@ -1,16 +1,17 @@
 import os
 from pathlib import Path
-import shutil
 import subprocess
+
+from . import toolchain
 
 
 class Diagnostics:
     """Records JIT object code and address ranges for report symbolization."""
 
     def __init__(self):
-        self.nm = shutil.which("llvm-nm-20")
+        self.nm = toolchain.which("llvm-nm")
         if not self.nm:
-            raise RuntimeError("JIT diagnostics require llvm-nm-20")
+            raise RuntimeError(f"JIT diagnostics require {toolchain.tool_name('llvm-nm')}")
         self.directory = Path(os.environ["NUMBA_SANITIZER_JIT_DIR"]).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.frames = self.directory / f"frames.{os.getpid()}.tsv"
