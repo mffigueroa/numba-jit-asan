@@ -221,7 +221,7 @@ ones. They apply whether a target is handwritten or generated.
 | **Let sizes cross the kernels' fixed capacities cheaply.** Derive shapes from fuzzer integers and fill them with patterns, repeated blocks or tiling of real data. | A target spending one input bit per array element capped its inputs far below a kernel's fixed-size internal buffer, so overflows of that buffer could never be reached. |
 | **Pass `-len_control=0`** for targets that read choices from the input (`FuzzedDataProvider`). | libFuzzer grows inputs slowly: after 28k runs the length limit was still 21 bytes, so choices read late in an input were never exercised. |
 | **Pass `-use_value_profile=1`.** | A 4-byte magic compared in JIT code was missed in 2M runs for one seed without it, and found in 26k-221k runs with it. |
-| **Set `-rss_limit_mb` from the measured baseline**, at least 1-2 GiB above it (4096 is a safe default). Set `ASAN_OPTIONS=allocator_may_return_null=1`. | Sanitized processes start at 0.8-1.9 GiB with scientific dependencies loaded. With 2048, several packages reported false *OOM* findings. Without `allocator_may_return_null`, a mutated huge size aborts in the allocator instead of raising `MemoryError`. |
+| **Set `-rss_limit_mb` from the measured baseline**, at least 1-2 GiB above it (4096 is a safe default). Set `ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size_mb=<half the RSS limit>`. | Sanitized processes start at 0.8-1.9 GiB with scientific dependencies loaded. With 2048, several packages reported false *OOM* findings. Mutated sizes also request single 10-12 GB allocations. libFuzzer's malloc limit reports these as OOM and stops fuzzing. With both options, ASan refuses them first, and NumPy and Numba raise `MemoryError`, which the target handles. |
 | **Cap Numba's threads** (`NUMBA_NUM_THREADS=2`) for `parallel=True` kernels. | With the default thread count on a busy host, each fork/join of a `prange` loop made inputs take seconds, up to about 170 s. |
 | **Keep inputs fast: at least ~5 executions/s after warm-up.** Shrink per-input work: iterations, bootstrap counts, model sizes. | Runs of 24-217 executions per minute (resampling- and model-fitting APIs) explore almost nothing, but still look "clean". |
 | **Treat only deliberate rejections as handled:** an explicit `raise` in the product, or validation inside a dependency. Never catch `Exception` or Numba's `TypingError`; generate valid types instead. | A deliberate `ValueError` from a package's own validation was misreported as a crash. Broad catches would hide `IndexError`/`ZeroDivisionError` raised from JIT code, which are real robustness findings. |
@@ -264,7 +264,7 @@ if __name__ == "__main__":
 ```
 
 ```sh
-NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1 \
+NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size_mb=2048 \
   .venv/bin/numba-asan run --fuzz fuzz_mypkg.py corpus/ -max_total_time=600 \
   -rss_limit_mb=4096 -timeout=60 -use_value_profile=1 -len_control=0
 ```

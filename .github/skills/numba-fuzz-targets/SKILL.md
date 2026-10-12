@@ -37,7 +37,7 @@ detects wrong results.
 ## Run settings
 
 ```sh
-NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1 \
+NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size_mb=2048 \
   numba-asan run --fuzz fuzz_pkg.py corpus/ -max_total_time=600 \
   -rss_limit_mb=4096 -timeout=60 -use_value_profile=1 -len_control=0
 ```
@@ -45,6 +45,8 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1 \
 - Budget startup (imports + warm-up) separately: instrumented compilation can
   take minutes, and up to about 13 min for packages compiling at import.
 - Count a run as fuzzing only above about 5 executions/s. Otherwise shrink per-input work.
+- Keep `max_allocation_size_mb` below `-rss_limit_mb`: huge single allocations
+  then raise `MemoryError` (handled) instead of ending the run as an OOM.
 - `build-deps`: ASan-only NumPy/Numba (no `--fuzzer`) unless the dependencies
   themselves are under test. Use `--wheelhouse` to reuse the builds.
 
