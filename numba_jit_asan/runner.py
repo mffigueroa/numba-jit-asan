@@ -370,6 +370,12 @@ def launch(plugin: Path, target: list[str], *, sanitizer: str = "address",
             suppressions = Path(__file__).with_name("lsan.supp")
             _prepend(env, "LSAN_OPTIONS",
                      f"suppressions={suppressions}:print_suppressions=0")
+    if sanitizer == "thread":
+        # A race is reported only if TSan can restore the other access's stack
+        # from its per-thread trace. Tight JIT loops fill the default trace
+        # after ~100k instrumented accesses and such races are dropped silently;
+        # the largest history roughly doubles that window.
+        _prepend(env, "TSAN_OPTIONS", "history_size=7")
     if undefined:
         _prepend(env, "UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1")
 

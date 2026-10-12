@@ -78,7 +78,7 @@ class ThreadSanitizerTests(SanitizerTestCase):
     def test_synchronized_code_is_clean(self):
         locked = self.run_tsan("race_locked")
         self.assert_clean(locked)
-        self.assertIn("counter 4000000", locked.stdout)
+        self.assertIn("counter 40000000", locked.stdout)
         reduction = self.run_tsan("race_reduction")
         self.assert_clean(reduction)
         self.assertIn("prange reduction passed", reduction.stdout)

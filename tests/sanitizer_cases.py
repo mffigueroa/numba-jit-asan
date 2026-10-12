@@ -59,13 +59,19 @@ def reduction_sum(values):
 
 
 def _threads(locked):
+    # TSan reports unordered accesses, not simultaneous ones. If a loaded host
+    # ran one loop entirely before the other started, the GIL hand-off would
+    # order them and there would be no race to report: start both together
+    # and make each loop long enough to overlap.
     counter = np.zeros(1, dtype=np.int64)
-    values = np.ones(2_000_000, dtype=np.int64)
+    values = np.ones(20_000_000, dtype=np.int64)
     accumulate(counter, values[:1])
     counter[0] = 0
     lock = threading.Lock()
+    start = threading.Barrier(2)
 
     def work():
+        start.wait()
         if locked:
             with lock:
                 accumulate(counter, values)
@@ -90,7 +96,9 @@ def race_locked():
 
 
 def race_prange():
-    print(racy_sum(np.ones(100_000)))
+    # Chunks long enough to overlap on a loaded host, yet short enough for TSan
+    # to restore the other worker's access (see README: ThreadSanitizer).
+    print(racy_sum(np.ones(200_000)))
 
 
 def race_reduction():

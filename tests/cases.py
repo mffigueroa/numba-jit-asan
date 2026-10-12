@@ -11,6 +11,15 @@ from numba import cfunc, guvectorize, njit, prange, types, vectorize
 from numba.extending import intrinsic
 
 
+def handler_name():
+    """NumPy's active memory handler (``numpy._core`` in 2.x, ``numpy.core`` in 1.x)."""
+    try:
+        multiarray = np._core.multiarray
+    except AttributeError:  # NumPy 1.x: numpy._core is a stub without multiarray
+        multiarray = np.core.multiarray
+    return multiarray.get_handler_name()
+
+
 @njit(boundscheck=False, cache=True)
 def write(values, index):
     values[index] = 123
@@ -120,7 +129,7 @@ def main():
         state = {}
 
         def worker():
-            state["policy"] = np._core.multiarray.get_handler_name()
+            state["policy"] = handler_name()
 
         thread = threading.Thread(target=worker)
         thread.start()
@@ -133,7 +142,7 @@ def main():
 
         def isolated():
             install_numpy_policy()
-            assert np._core.multiarray.get_handler_name() == "numba_asan_malloc"
+            assert handler_name() == "numba_asan_malloc"
 
         contextvars.Context().run(isolated)
         print("isolated context policy installed")

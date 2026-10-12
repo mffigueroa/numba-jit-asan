@@ -576,6 +576,15 @@ the run exits with 66. Caveats:
 - TSan reports races it observes: accesses must actually be unordered in the
   executed interleaving. Very short `nogil` calls may be ordered by the GIL
   hand-off and go unreported.
+- TSan must also restore the stack of the *earlier* racing access from a
+  bounded per-thread trace. If the other thread made more than roughly
+  200,000 instrumented accesses since then, the race is dropped silently.
+  `numba-asan run` sets `TSAN_OPTIONS=history_size=7` (the maximum; about
+  100,000 with the default). A typical case is a shared accumulator that LLVM
+  loads before and stores after a long `prange` chunk. Reproduce races with
+  small inputs: a race needs overlapping threads, not large data. In one
+  test, 200,000 elements were detected every time, while 5,000,000 lost the
+  update every time and were never reported.
 - CPython, NumPy and Numba's C code are uninstrumented: races *inside* them
   are not detected, and synchronization implemented with uninstrumented
   atomics would be invisible (none is used on the tested paths).

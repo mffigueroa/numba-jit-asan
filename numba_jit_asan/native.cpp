@@ -13,6 +13,9 @@
 #else
 #define PY_SSIZE_T_CLEAN
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+// PyDataMem_SetHandler is NumPy 1.22 API; NumPy >= 1.25 headers hide APIs
+// newer than their default target (1.19) unless a target is requested.
+#define NPY_TARGET_VERSION NPY_1_22_API_VERSION
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <sanitizer/asan_interface.h>
