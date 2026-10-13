@@ -95,6 +95,22 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   named files and their small siblings into the seed, rewrite argv to a fresh
   workspace per replay, and mutate the file contents. File-format
   mutation found a JIT heap overflow that argv replay alone could not reach.
+- When seeds come from recorded test calls, record the API the test called,
+  not the frame that ran. Tests often reach JIT code through third-party
+  code, such as an inherited sklearn `fit_transform`, a product callback
+  passed to `pairwise_distances`, or click's `CliRunner.invoke`. Name methods
+  through the receiver's class, so subclasses and inherited classmethods
+  replay unchanged. Check that every name resolves back to the executed code:
+  sklearn's `set_output` wrappers share code, so tell them apart by closure,
+  and `singledispatch` implementations are all named `_`.
+- Pickle seed arguments with plain pickle first (arrays stay mutable), then
+  cloudpickle (closures and classes defined in the test). Pickle product
+  singletons by module reference. Never unpickle and re-pickle recorded
+  blobs: a class pickled by value can fail to rebuild ("metaclass conflict").
+  Resolve references between calls through the original call index instead.
+- Snapshot the test's `tmp_path` for each call that names a path inside it,
+  and give every replay a fresh copy. Replaying against the recorded
+  directory fails on "already exists" checks and reads the recorded outputs.
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
