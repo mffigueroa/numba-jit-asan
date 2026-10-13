@@ -203,6 +203,30 @@ class AddressSanitizerTests(SanitizerTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("safe code passed", result.stdout)
 
+    def test_source_with_byte_order_mark(self):
+        # Debug info makes Numba re-parse the source file; a UTF-8 BOM must not
+        # stop compilation, and reports must still point at the source line.
+        source = ("import numpy as np\n"
+                  "from numba import njit\n\n\n"
+                  "@njit(boundscheck=False)\n"
+                  "def write(values, index):\n"
+                  "    values[index] = 1.0  # bom: overflow\n\n\n"
+                  "write(np.zeros(4), 0)\n"
+                  "print('bom compiled', flush=True)\n"
+                  "write(np.zeros(4), 4)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "bom_case.py"
+            script.write_bytes(b"\xef\xbb\xbf" + source.encode())
+            result = run_bounded(
+                [sys.executable, "-m", "numba_jit_asan.runner", "run",
+                 "--plugin", str(self.plugin), str(script)],
+                cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=300,
+            )
+        self.assertIn("bom compiled", result.stdout, result.stderr)
+        self.assert_asan(result, "heap-buffer-overflow", "WRITE")
+        self.assertRegex(result.stderr, r"bom_case\.py:7:\d+")
+
 
 if __name__ == "__main__":
     unittest.main()

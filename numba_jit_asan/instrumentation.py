@@ -31,6 +31,43 @@ def _run_opt(opt, plugin, pipeline, module_text, name):
     return result.stdout
 
 
+def _install_first_line_finder():
+    """Make debug-info source lookup tolerate files Python itself accepts.
+
+    numba-asan enables debug info (for source lines in reports). With it, Numba
+    re-parses each function's file to find its first body line, reading it with
+    ``open()``: a UTF-8 byte-order mark (or another declared encoding) then
+    breaks ``ast.parse`` and the function cannot be compiled at all. Read the
+    source as Python does (``tokenize.open``); if it still cannot be parsed,
+    return None, which Numba already handles (approximate def location).
+    """
+    import ast
+    import textwrap
+    import tokenize
+
+    from numba.core import lowering
+    from numba.misc import firstlinefinder
+
+    original = lowering.get_func_body_first_lineno
+
+    def get_func_body_first_lineno(pyfunc):
+        try:
+            return original(pyfunc)
+        except (SyntaxError, UnicodeDecodeError):
+            pass
+        code = pyfunc.__code__
+        try:
+            with tokenize.open(code.co_filename) as handle:
+                tree = ast.parse(textwrap.dedent(handle.read()))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            return None
+        finder = firstlinefinder.FindDefFirstLine(code.co_name, code.co_firstlineno)
+        finder.visit(tree)
+        return finder.first_stmt_line or None
+
+    lowering.get_func_body_first_lineno = get_func_body_first_lineno
+
+
 def enable(*, opt: str, plugin: Path, sanitizer: str = "address",
            undefined: bool = False, coverage: bool = False) -> None:
     """Install process-wide CPU instrumentation before importing Numba."""
@@ -77,6 +114,7 @@ def enable(*, opt: str, plugin: Path, sanitizer: str = "address",
         keepalive.append(install_msan(plugin.with_name("numba_msan_native.so")))
     diagnostics = Diagnostics()
     atheris_compat.install(os.environ.get("NUMBA_ASAN_RELAUNCH"))
+    _install_first_line_finder()
     for options_class in (CPUTargetOptions, UFuncTargetOptions):
         original_options = options_class.finalize
 
