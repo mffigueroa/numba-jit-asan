@@ -78,6 +78,10 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   wrote ~100 GB of `DEADLYSIGNAL` lines.
 - Do not edit files a running job depends on (requirements, suites,
   inventories). The integration runner fingerprints them and fails the job.
+- Guard every side effect of a fuzz target with `if __name__ == "__main__":`.
+  Products that use `multiprocessing` (spawn/forkserver, or the Python 3.14
+  default) re-import the main script in each worker; an unguarded target
+  re-runs its setup there and the pool breaks (`BrokenProcessPool`).
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
