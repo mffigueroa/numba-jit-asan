@@ -82,6 +82,19 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   Products that use `multiprocessing` (spawn/forkserver, or the Python 3.14
   default) re-import the main script in each worker; an unguarded target
   re-runs its setup there and the pool breaks (`BrokenProcessPool`).
+- Pass Numba dispatchers to `spawn`/`forkserver` workers only under
+  numba-asan 89824da or later. Before that, the workers ran uninstrumented JIT
+  code. Under Atheris `instrument_imports` they also failed with
+  `TypingError: Unknown attribute '_trace_branch'`, because a dispatcher not
+  yet compiled in the parent was pickled with instrumented bytecode. Products
+  that force `set_start_method("spawn")` at import (e.g. in a `utils` module)
+  hit this even when the test never asks for parallelism.
+- CLI seeds must carry their input files. A recorded argv points into the
+  test's `tmp_path`, which is deleted before warm-up, so every seed is
+  dropped (`FileNotFoundError`, "input file should exist"). Snapshot the
+  named files and their small siblings into the seed, rewrite argv to a fresh
+  workspace per replay, and mutate the file contents. File-format
+  mutation found a JIT heap overflow that argv replay alone could not reach.
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
