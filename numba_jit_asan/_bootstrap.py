@@ -32,11 +32,10 @@ def _relauncher(args):
     return str(path)
 
 
-def main() -> None:
-    args = sys.argv[1:]
-    target = args[:2] if args[0] == "-m" else [str(Path(args[0]).resolve())]
-    if os.environ.get("NUMBA_SANITIZER_COVERAGE") == "1":
-        os.environ["NUMBA_ASAN_RELAUNCH"] = _relauncher(target)
+_CHILD_PREAMBLE = "import numba_jit_asan._bootstrap as _numba_asan; _numba_asan.child(); "
+
+
+def _enable_from_environment() -> None:
     enable(
         opt=os.environ["NUMBA_ASAN_OPT"],
         plugin=Path(os.environ["NUMBA_ASAN_PLUGIN"]),
@@ -44,6 +43,45 @@ def main() -> None:
         undefined=os.environ.get("NUMBA_SANITIZER_UNDEFINED") == "1",
         coverage=os.environ.get("NUMBA_SANITIZER_COVERAGE") == "1",
     )
+    _sanitize_multiprocessing_children()
+
+
+def _sanitize_multiprocessing_children() -> None:
+    """Enable the sanitizer in multiprocessing spawn and forkserver children.
+
+    Those start a fresh interpreter (``python -c "from multiprocessing...``)
+    that inherits the sanitizer runtime but would otherwise compile JIT code
+    uninstrumented. Fork children inherit the instrumented process as is.
+    """
+    from multiprocessing import util
+
+    spawnv_passfds = util.spawnv_passfds
+    if getattr(spawnv_passfds, "_numba_asan", False):
+        return
+
+    def sanitized_spawnv_passfds(path, args, passfds):
+        args = list(args)
+        for index, arg in enumerate(args[:-1]):
+            if arg == "-c" and args[index + 1].startswith("from multiprocessing"):
+                args[index + 1] = _CHILD_PREAMBLE + args[index + 1]
+                break
+        return spawnv_passfds(path, args, passfds)
+
+    sanitized_spawnv_passfds._numba_asan = True
+    util.spawnv_passfds = sanitized_spawnv_passfds
+
+
+def child() -> None:
+    """Entry point of a multiprocessing spawn/forkserver child process."""
+    _enable_from_environment()
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    target = args[:2] if args[0] == "-m" else [str(Path(args[0]).resolve())]
+    if os.environ.get("NUMBA_SANITIZER_COVERAGE") == "1":
+        os.environ["NUMBA_ASAN_RELAUNCH"] = _relauncher(target)
+    _enable_from_environment()
     if os.environ.get("NUMBA_SANITIZER_LEAKS") != "1":
         _run(sys.argv[1:])
         return

@@ -163,3 +163,16 @@ def install(relaunch=None) -> None:
         return from_function(cls, pyfunc)
 
     identity.from_function = classmethod(restoring_from_function)
+
+    # Pickling a dispatcher (e.g. for a multiprocessing worker) ships py_func's
+    # bytecode, which may not have been restored yet if it was never compiled.
+    from numba.core.dispatcher import Dispatcher
+
+    reduce_states = Dispatcher._reduce_states
+    if not getattr(reduce_states, "_numba_asan", False):
+        def restoring_reduce_states(self):
+            restore(self.py_func)
+            return reduce_states(self)
+
+        restoring_reduce_states._numba_asan = True
+        Dispatcher._reduce_states = restoring_reduce_states

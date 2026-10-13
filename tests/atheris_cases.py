@@ -12,7 +12,8 @@ from numba import njit
 
 CASE = os.environ["FUZZ_CASE"]
 
-if CASE == "instrument_imports":
+# Multiprocessing spawn children re-import this script as __mp_main__.
+if CASE == "instrument_imports" or (CASE == "spawn" and __name__ == "__main__"):
     with atheris.instrument_imports():
         import atheris_module as module
 else:
@@ -53,11 +54,21 @@ def TestOneInput(raw):
         spin(data)
     elif CASE == "shift":
         shift(data)
+    elif CASE == "spawn":
+        # The instrumented, never compiled dispatcher is pickled to a spawned
+        # worker, which must compile it from the original bytecode, sanitized.
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(1, mp_context=context) as pool:
+            pool.submit(module.checksum, np.array([0x7F, 0x45, 200], dtype=np.uint8)).result()
 
 
-if CASE == "instrument_all":
-    atheris.instrument_all()
-if CASE == "fork":
-    TestOneInput(b"")  # compile JIT code before fuzzing, as recommended for -fork
-atheris.Setup(sys.argv, TestOneInput)
-atheris.Fuzz()
+if __name__ == "__main__":
+    if CASE == "instrument_all":
+        atheris.instrument_all()
+    if CASE == "fork":
+        TestOneInput(b"")  # compile JIT code before fuzzing, as recommended for -fork
+    atheris.Setup(sys.argv, TestOneInput)
+    atheris.Fuzz()

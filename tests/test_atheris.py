@@ -95,6 +95,16 @@ class AtherisTests(SanitizerTestCase):
         self.assertNotIn("Uncaught Python exception", output)
         self.assertEqual(code, 0, output)
 
+    def test_spawned_workers_compile_original_bytecode_and_are_sanitized(self):
+        code, output, _ = self.fuzz("spawn", "-runs=1")
+        self.assertNotIn("TypingError", output)
+        self.assertNotIn("instrumented by Atheris before numba-asan", output)
+        self.assertIn("ERROR: AddressSanitizer: heap-buffer-overflow", output)
+        line = source_line(MODULE, "# atheris module: overflow")
+        self.assertRegex(output, rf"#0 0x[0-9a-f]+ in atheris_module::checksum\([^\n]*\) "
+                                 rf"{MODULE}:{line}:")
+        self.assertNotEqual(code, 0, output)
+
     def test_fork_mode_children_are_sanitized(self):
         code, output, directory = self.fuzz("fork", "-fork=1", "-max_total_time=150")
         self.assertIn("-fork=1: fuzzing in separate process", output)
