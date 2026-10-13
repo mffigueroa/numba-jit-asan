@@ -111,6 +111,15 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - Snapshot the test's `tmp_path` for each call that names a path inside it,
   and give every replay a fresh copy. Replaying against the recorded
   directory fails on "already exists" checks and reads the recorded outputs.
+- Measure before speeding up a slow target: record time per replayed call,
+  the cost of an unmutated seed, and Numba compilations after warm-up.
+  Across ~20 slow products, only one recompiled per input; the product JITs
+  the user's callable on every call. The rest were slow per call under the
+  sanitizer, with model loading, file conversion and long fits taking
+  1–60 s. Remedies that help: run unmutated setup calls once and restore a
+  joint deep copy (copying results separately breaks identity, since
+  `fit` returns `self`); give slow products a longer, capped budget
+  measured in executions rather than executions per second.
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
