@@ -78,3 +78,21 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   wrote ~100 GB of `DEADLYSIGNAL` lines.
 - Do not edit files a running job depends on (requirements, suites,
   inventories). The integration runner fingerprints them and fails the job.
+- Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
+  before importing the product and pass the saved list to `atheris.Setup`.
+  Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
+  on `-rss_limit_mb=...`.
+- libFuzzer's `-timeout` may miss hangs in multithreaded processes (SIGALRM
+  reaches a Numba/OpenMP worker). Arm `faulthandler.dump_traceback_later(t,
+  exit=True)` per input; it works while JIT code holds the GIL. Search its
+  "Timeout (h:mm:ss)!" banner anywhere in the log: product progress bars may
+  leave no newline before it.
+- Under the `workqueue` threading layer, Numba drops bounds-check errors
+  raised in `prange` kernels. The call returns with uninitialized output.
+  Cross-check parallel findings with OpenMP (`NUMBA_THREADING_LAYER=omp`).
+  Errors escaping parallel kernels surface as
+  `SystemError: ... returned a result with an exception set`: treat it as an
+  implicit (robustness) error.
+- Corroborate ASan findings independently: replay with `NUMBA_BOUNDSCHECK=1`
+  (an `IndexError` replaces the report), or replay the call in plain Python
+  (a segfault confirms it).
