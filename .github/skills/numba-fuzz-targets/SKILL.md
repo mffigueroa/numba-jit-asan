@@ -154,7 +154,12 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   reached through standard-library wrapper frames, and a class with its own
   `__new__` must be replayed as the class call (`__new__` alone skips
   `__init__`). Attribute access through `__getattr__` is not an API call:
-  replaying it on an unpickled receiver can recurse forever.
+  replaying it on an unpickled receiver can recurse forever. Also snapshot
+  scratch files tests create next to themselves (not only `tmp_path`) and
+  directories they put on `sys.path` (model packages imported by name).
+- Verify a "clean" automatic run actually exercised the JIT-reaching call:
+  a seed that replays only a trivial setup call reports thousands of
+  executions per second while testing nothing.
 - Guard every fuzzing step with a memory limit below the job's cgroup cap:
   a runaway input then becomes an OOM finding instead of an evidence-less
   job kill.
