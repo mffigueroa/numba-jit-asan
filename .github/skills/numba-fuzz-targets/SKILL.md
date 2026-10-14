@@ -181,3 +181,7 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - More seeds per test help: keep several argument variants of the same call
   chain (parametrized tests), and record public functions the product calls
   internally with the values it passes them.
+- Recording must not change the program under test: pickling an argument
+  can mutate it (a `__getstate__` that pops attributes from the live object).
+  Snapshot and restore argument objects' attributes around pickling, and
+  re-check seed counts and statuses on a random sample after recorder changes.
