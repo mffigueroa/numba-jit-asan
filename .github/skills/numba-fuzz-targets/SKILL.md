@@ -162,3 +162,7 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   mutate setup calls rarely and restore their results from a cache; a setter
   returning None in the middle should only shorten the cached prefix, not
   disable caching.
+- Tests that run a CLI in-process (`runpy.run_module`, `runpy.run_path`) are
+  replayable entry points with their argv and input files. A script outside
+  the package re-creates its `@njit` functions on every execution, so each
+  input recompiles: expect such seeds to be too slow.
