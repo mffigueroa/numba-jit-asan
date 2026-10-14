@@ -171,3 +171,13 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   replayable entry points with their argv and input files. A script outside
   the package re-creates its `@njit` functions on every execution, so each
   input recompiles: expect such seeds to be too slow.
+- Products that `njit` a fresh but equivalent function per call (closures,
+  lambdas, `lambdify` output, callbacks unpickled per input) recompile on
+  every input. Reusing the first dispatcher is safe when the code and every
+  compile-time constant (closure cells, defaults, referenced globals) are
+  equal; compare the code captured at jit time, since numba-jit-asan swaps a
+  jitted function's Atheris-instrumented code for the original afterwards.
+  Replay findings with reuse disabled.
+- More seeds per test help: keep several argument variants of the same call
+  chain (parametrized tests), and record public functions the product calls
+  internally with the values it passes them.
