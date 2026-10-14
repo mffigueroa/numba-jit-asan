@@ -12,7 +12,11 @@ requires-python = ">=3.10"
 dependencies = ["numba>=0.62.1,<0.69", "llvmlite>=0.45.1,<0.51"]
 
 [project.optional-dependencies]
-fuzz = ["atheris==3.1.0"]
+# Atheris 3.x imports only on Python >= 3.11 (it uses dis.Positions); 3.1.0 has
+# no CPython 3.11 wheels.
+fuzz = ['atheris==3.1.0; python_version >= "3.12"',
+        'atheris==3.0.0; python_version == "3.11"',
+        'atheris==2.3.0; python_version < "3.11"']
 
 [project.scripts]
 numba-asan = "numba_jit_asan.runner:main"

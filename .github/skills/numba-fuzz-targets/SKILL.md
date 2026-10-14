@@ -138,3 +138,16 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - Corroborate ASan findings independently: replay with `NUMBA_BOUNDSCHECK=1`
   (an `IndexError` replaces the report), or replay the call in plain Python
   (a segfault confirms it).
+- Atheris 3.x imports only on Python >= 3.11 (it uses `dis.Positions`), and
+  3.1.0 has no CPython 3.11 wheels: use 2.3.0 on 3.10 and 3.0.0 on 3.11.
+  Source builds of Atheris find libFuzzer through `CLANG_BIN`.
+- Products often pin an older Numba/llvmlite in their lock files. Overriding
+  the pin with a supported release (uv `--overrides`, also dropping the
+  product's own Numba override) and letting the product's test suite validate
+  the result unblocks most of them; try both supported Numba releases.
+- If the ASan rebuild of NumPy fails (old releases predate Meson), fuzz with
+  the stock wheels: the product's JIT code is still instrumented.
+- Seeds must reproduce the test's process context: tests that `chdir` into a
+  prepared directory call the product with relative paths, and Numba
+  dispatchers registered with `functools.singledispatch` are reached through
+  standard-library wrapper frames, not directly from the test.

@@ -110,7 +110,7 @@ Do not run intentionally corrupting examples without the sanitizer launcher.
 built on libFuzzer. `numba-asan run --fuzz` makes it effective on Numba code:
 
 ```sh
-.venv/bin/python -m pip install -e ".[fuzz]"   # installs Atheris
+.venv/bin/python -m pip install -e ".[fuzz]"   # installs Atheris (2.3.0 on Python 3.10)
 .venv/bin/numba-asan build          # also builds the Atheris runtime
 .venv/bin/numba-asan run --fuzz fuzz_parser.py -max_total_time=600 -rss_limit_mb=2048
 ```
