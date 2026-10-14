@@ -99,7 +99,9 @@ class AtherisTests(SanitizerTestCase):
         code, output, _ = self.fuzz("spawn", "-runs=1")
         self.assertNotIn("TypingError", output)
         self.assertNotIn("instrumented by Atheris before numba-asan", output)
-        self.assertIn("ERROR: AddressSanitizer: heap-buffer-overflow", output)
+        # The out-of-bounds read lands in a redzone or, depending on how the
+        # Python version lays out the unpickled argument, in a freed chunk.
+        self.assertRegex(output, r"ERROR: AddressSanitizer: heap-(buffer-overflow|use-after-free)")
         line = source_line(MODULE, "# atheris module: overflow")
         self.assertRegex(output, rf"#0 0x[0-9a-f]+ in atheris_module::checksum\([^\n]*\) "
                                  rf"{MODULE}:{line}:")
