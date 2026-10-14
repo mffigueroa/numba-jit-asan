@@ -148,6 +148,12 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - If the ASan rebuild of NumPy fails (old releases predate Meson), fuzz with
   the stock wheels: the product's JIT code is still instrumented.
 - Seeds must reproduce the test's process context: tests that `chdir` into a
-  prepared directory call the product with relative paths, and Numba
-  dispatchers registered with `functools.singledispatch` are reached through
-  standard-library wrapper frames, not directly from the test.
+  prepared directory call the product with relative paths, and environment
+  variables the test set (a GUI toolkit's offscreen platform) must apply at
+  replay. Numba dispatchers registered with `functools.singledispatch` are
+  reached through standard-library wrapper frames, and a class with its own
+  `__new__` must be replayed as the class call (`__new__` alone skips
+  `__init__`).
+- Guard every fuzzing step with a memory limit below the job's cgroup cap:
+  a runaway input then becomes an OOM finding instead of an evidence-less
+  job kill.
