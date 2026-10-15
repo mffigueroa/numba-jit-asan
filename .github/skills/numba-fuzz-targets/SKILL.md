@@ -216,3 +216,10 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - After any recorder change, compare usable seeds (recorded minus dropped)
   per product with the previous run. Status alone hides regressions that only
   drop some chains.
+- Passing an earlier result by reference loses changes the test made in place
+  through a sub-object (`adata.obsp[key] = m`, `arr[0] = x`). Keep a digest of
+  each result's state after the last recorded call that used it. Pass the
+  result by value once the digest differs.
+- A run SIGKILLed by the job's memory cap after fuzzing began has no
+  artifact. Restart it like an unreproduced OOM rather than reporting
+  "exited 137".
