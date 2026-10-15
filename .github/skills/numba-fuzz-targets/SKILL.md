@@ -185,3 +185,10 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   can mutate it (a `__getstate__` that pops attributes from the live object).
   Snapshot and restore argument objects' attributes around pickling, and
   re-check seed counts and statuses on a random sample after recorder changes.
+- A constructor behind a decorator (`functools.wraps` around `__init__`) is
+  still a class call: record it as one so the instance becomes a reference for
+  later calls (`obj(...)`, `obj.method(...)`). Otherwise the receiver is pickled
+  by value with all the data it loaded and can exceed size limits, losing the seed.
+- Judge "too slow to fuzz" by an execution count capped at the smoke budget
+  (rate x min(budget, 120 s)), not rate x budget: longer SDL budgets must never
+  downgrade a slow product that was fuzzed enough in a short run.
