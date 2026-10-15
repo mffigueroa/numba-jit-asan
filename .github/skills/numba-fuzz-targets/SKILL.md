@@ -192,3 +192,10 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - Judge "too slow to fuzz" by an execution count capped at the smoke budget
   (rate x min(budget, 120 s)), not rate x budget: longer SDL budgets must never
   downgrade a slow product that was fuzzed enough in a short run.
+- A property setter (`obj.attr = x`) shares its qualname with the getter;
+  resolving the recorded name gives the getter and replay fails with an
+  argument-count TypeError. Record setters as `Class.attr.fset`.
+- Numba leaks arrays allocated in a jitted function that raises, so RSS can
+  grow across many rejected inputs until libFuzzer reports an OOM that no
+  single input reproduces. Restart from the corpus and count executions
+  across the runs; do not report it as a finding.
