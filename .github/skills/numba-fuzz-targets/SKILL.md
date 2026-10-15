@@ -207,3 +207,12 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - An output path the test names inside a scratch directory it created (not
   yet existing) must be snapshotted with that directory. Otherwise replay
   writes into a directory that is already gone.
+- Do not record NumPy `__array_function__` dispatcher frames (`np.where`'s
+  Python dispatcher returns `(condition, x, y)`) as calls. Their result is not
+  the function's, so references into it break replay with typing errors.
+- A base `__init__` reached through `super()` from a constructor the test
+  defined is not a class call: replaying `TestSubclass(base_args)` runs the
+  test's constructor with the wrong arguments. Pass such instances by value.
+- After any recorder change, compare usable seeds (recorded minus dropped)
+  per product with the previous run. Status alone hides regressions that only
+  drop some chains.
