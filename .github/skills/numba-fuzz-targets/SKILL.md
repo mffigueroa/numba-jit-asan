@@ -199,3 +199,11 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   grow across many rejected inputs until libFuzzer reports an OOM that no
   single input reproduces. Restart from the corpus and count executions
   across the runs; do not report it as a finding.
+- Tests often configure an object with plain attribute assignments
+  (`obj.option = {...}`), which a profile hook never sees. Diff the object's
+  `__dict__` against its state after the last recorded call that used it and
+  replay the changes as `setattr` calls. Otherwise the replay drops the seed
+  with a missing-configuration error.
+- An output path the test names inside a scratch directory it created (not
+  yet existing) must be snapshotted with that directory. Otherwise replay
+  writes into a directory that is already gone.
