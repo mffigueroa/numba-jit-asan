@@ -165,6 +165,53 @@ _BUILD_OPTIONS = {
 }
 
 
+# Peak memory of one ASan + debug-info compile of NumPy's larger C files.
+_MEMORY_PER_BUILD_JOB = 1 << 30
+
+
+def _memory_budget() -> int | None:
+    """Bytes this build may use: MemAvailable, capped by a cgroup v2 memory.max."""
+    budget = None
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                budget = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        relative = Path("/proc/self/cgroup").read_text().splitlines()[0].split("::", 1)[1]
+        group = Path("/sys/fs/cgroup") / relative.lstrip("/")
+        limit = (group / "memory.max").read_text().strip()
+        if limit.isdigit():
+            used = int((group / "memory.current").read_text().strip())
+            room = max(0, int(limit) - used)
+            budget = room if budget is None else min(budget, room)
+    except (OSError, ValueError, IndexError):
+        pass
+    return budget
+
+
+def build_jobs() -> int:
+    """Parallel compile jobs for build-deps: ``NUMBA_ASAN_BUILD_JOBS``, else the
+    CPU count limited to one job per GiB of available memory (sanitized
+    debug builds of NumPy otherwise exhaust memory-capped jobs)."""
+    configured = os.environ.get("NUMBA_ASAN_BUILD_JOBS")
+    if configured:
+        return max(1, int(configured))
+    jobs = os.cpu_count() or 1
+    budget = _memory_budget()
+    if budget is not None:
+        jobs = min(jobs, max(1, budget // _MEMORY_PER_BUILD_JOB))
+    return jobs
+
+
+def _build_options(name: str, jobs: int) -> list[str]:
+    options = list(_BUILD_OPTIONS[name])
+    if name == "numpy":
+        options.append(f"-Ccompile-args=-j{jobs}")  # meson-python's ninja parallelism
+    return options
+
+
 def _find_wheel(directory: Path, name: str, version: str) -> Path | None:
     tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     matches = sorted(directory.glob(f"{name}-{version}-{tag}-*.whl"))
@@ -195,6 +242,10 @@ def build_dependencies(fuzzer: bool = False, wheelhouse: Path | None = None) -> 
     )
     # Build tools and Python code run during the build; never sanitize the pip process.
     env.pop("LD_PRELOAD", None)
+    jobs = build_jobs()
+    env.setdefault("MAX_JOBS", str(jobs))
+    env.setdefault("CMAKE_BUILD_PARALLEL_LEVEL", str(jobs))
+    print(f"Building with {jobs} parallel compile job(s)")
     flavor = f"llvm{llvm_major()}-{sanitizers.replace(',', '-')}"
     with tempfile.TemporaryDirectory(prefix="numba-asan-wheels-") as scratch:
         cache = Path(wheelhouse).resolve() / flavor if wheelhouse else Path(scratch)
@@ -209,7 +260,7 @@ def build_dependencies(fuzzer: bool = False, wheelhouse: Path | None = None) -> 
                 try:
                     subprocess.run(
                         [*_wheel_builder(), "--no-binary", name, "-w", str(staging),
-                         f"{name}=={versions[name]}", *_BUILD_OPTIONS[name]],
+                         f"{name}=={versions[name]}", *_build_options(name, jobs)],
                         env=env, check=True,
                     )
                     built = _find_wheel(staging, name, versions[name])

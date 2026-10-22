@@ -77,6 +77,10 @@ rebuild them with ASan in a **dedicated** environment (about 6 minutes):
 .venv/bin/numba-asan build-deps
 ```
 
+Sanitized debug compiles need about 1 GiB each. The build therefore runs one
+compile job per GiB of available memory (including a cgroup memory limit, up
+to the CPU count); set `NUMBA_ASAN_BUILD_JOBS` to override this.
+
 Run your own application or test module:
 
 ```sh

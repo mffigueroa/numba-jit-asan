@@ -33,5 +33,34 @@ class FuzzExtraTests(unittest.TestCase):
                 self.assertTrue(selected[0].startswith("==2."), selected)
 
 
+class BuildJobsTests(unittest.TestCase):
+    """build-deps sizes compile parallelism to the memory it may use."""
+
+    def setUp(self):
+        import os
+        from numba_jit_asan import runner
+        self.runner = runner
+        self.saved = os.environ.pop("NUMBA_ASAN_BUILD_JOBS", None)
+
+    def tearDown(self):
+        import os
+        os.environ.pop("NUMBA_ASAN_BUILD_JOBS", None)
+        if self.saved is not None:
+            os.environ["NUMBA_ASAN_BUILD_JOBS"] = self.saved
+
+    def test_jobs_follow_memory_budget_and_override(self):
+        import os
+        from unittest import mock
+        with mock.patch.object(self.runner, "_memory_budget", return_value=3 << 30), \
+                mock.patch.object(os, "cpu_count", return_value=16):
+            self.assertEqual(self.runner.build_jobs(), 3)
+        with mock.patch.object(self.runner, "_memory_budget", return_value=100 << 20):
+            self.assertEqual(self.runner.build_jobs(), 1)
+        os.environ["NUMBA_ASAN_BUILD_JOBS"] = "5"
+        self.assertEqual(self.runner.build_jobs(), 5)
+        self.assertIn("-Ccompile-args=-j5", self.runner._build_options("numpy", 5))
+        self.assertNotIn("-Ccompile-args=-j5", self.runner._build_options("numba", 5))
+
+
 if __name__ == "__main__":
     unittest.main()

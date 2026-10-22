@@ -120,6 +120,26 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   joint deep copy (copying results separately breaks identity, since
   `fit` returns `self`); give slow products a longer, capped budget
   measured in executions rather than executions per second.
+- Fuzz against a declared threat model. Mutating every recorded argument also
+  mutates trusted configuration (a model's patch size, a server's limits) and
+  produces noise, e.g. a hang from a 10 000-pixel patch size that no
+  deployment uses. List which calls and parameters the attacker controls, and
+  replay the rest at production values.
+- Image inputs need format-aware mutation. Random byte flips are rejected by
+  the decoder before any JIT code runs. Decode, change the size (1, 2, 3,
+  multiples of patch sizes ±1, extreme aspect ratios), the mode or channel
+  count (L, LA, P, RGBA, I;16, F, CMYK; arrays HxW and HxWx1/2/4) and the
+  container format, then re-encode. Also lie in the header (PNG IHDR with a
+  valid CRC) to test size checks.
+- A clean result only means something if the sanitizer demonstrably covers
+  the kernel. Run a detection canary: call the JIT function directly with an
+  output buffer one element short and a 1-channel input, expect ASan WRITE and
+  READ reports at its source lines, and expect a consistent call to stay
+  clean.
+- Building NumPy with ASan and debug info takes about 1 GiB per compile job,
+  and its final link about 4 GiB. Size `build-deps` parallelism to the
+  memory cap (`NUMBA_ASAN_BUILD_JOBS`), or memory-capped CI jobs fail while
+  the build is still preparing metadata.
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
