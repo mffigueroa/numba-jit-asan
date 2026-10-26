@@ -140,6 +140,11 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   and its final link about 4 GiB. Size `build-deps` parallelism to the
   memory cap (`NUMBA_ASAN_BUILD_JOBS`), or memory-capped CI jobs fail while
   the build is still preparing metadata.
+- `NUMBA_BOUNDSCHECK=1` has no effect on an `@njit(cache=True)` function
+  loaded from an on-disk cache that was compiled without it. The run silently
+  goes unchecked. Use a fresh `NUMBA_CACHE_DIR` (or run under `numba-asan
+  run`, which disables caches) when using boundscheck as an oracle or
+  cross-check.
 - Hide libFuzzer's arguments from product code: set `sys.argv = [sys.argv[0]]`
   before importing the product and pass the saved list to `atheris.Setup`.
   Packages that parse `sys.argv` at import (argparse, docopt) otherwise exit
