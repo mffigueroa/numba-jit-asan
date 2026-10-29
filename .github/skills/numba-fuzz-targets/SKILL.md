@@ -248,3 +248,29 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
 - A run SIGKILLed by the job's memory cap after fuzzing began has no
   artifact. Restart it like an unreproduced OOM rather than reporting
   "exited 137".
+- libFuzzer stops at the first crash. In an automatic matrix, "1 memory-safety
+  finding" often meant 25–160 executions of a 600 s budget, with the
+  product's other kernels never fuzzed. After each reproduced finding, set its
+  artifacts aside and resume from the corpus for the remaining budget. Merge
+  findings and count a bug hit again once. Check executions per layer, not just
+  the status.
+- A passing suite with full JIT coverage does not show that the fuzzer reaches
+  every kernel. Count dispatcher calls per kernel while replaying the seeds or
+  corpus. Two silent gaps:
+  - a recorded call returning a generator (`__iter__` of a batch sampler) runs
+    nothing unless replay consumes it as the test did;
+  - kernels behind global process state (an initialized `torch.distributed`
+    group) are unreachable from argument replay.
+- Kernels that run only in a distributed group need a hand-written target with
+  a real multi-rank group: a persistent peer process receives each input over a
+  pipe and runs the same collective calls. A single-rank group is not
+  equivalent; code assuming `world_size > 1` can fail before the kernel (e.g.
+  `torch.cat` of an un-gathered tensor).
+- Suites often stand in for user data with small fixture classes (a dataset
+  reporting per-sample sizes). The data the kernels consume then lives in
+  fixture attributes, not call arguments. Mutate attributes of objects whose
+  class the suite defines; keep product objects opaque.
+- When an `assert` in the product enforces a documented precondition, keep a
+  hand-written target's inputs within it if the automatic layer already reports
+  the assert. Otherwise the target stops on that known robustness finding
+  within seconds and fuzzes nothing else.
