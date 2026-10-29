@@ -274,3 +274,26 @@ NUMBA_NUM_THREADS=2 ASAN_OPTIONS=allocator_may_return_null=1:max_allocation_size
   hand-written target's inputs within it if the automatic layer already reports
   the assert. Otherwise the target stops on that known robustness finding
   within seconds and fuzzes nothing else.
+- Report per-kernel fuzz reach with every result: count calls into Numba
+  dispatchers from Python after warm-up, and credit kernels called from JIT
+  code through the recorded call chain that reached them. Compare against the
+  inventory and print `kernels fuzzed: k/N (not fuzzed: ...)`. Two counting
+  traps:
+  - write the counts when a kernel is first entered, before it runs, because a
+    sanitizer abort inside it loses periodically written stats;
+  - also credit the kernels named in a reproduced crash's JIT frames. Parallel
+    (parfor) kernels fault on worker threads whose stacks lack the parent
+    kernel.
+- Hand developers a reproducer, not an artifact. Dump the replayed calls, and
+  write the crashing call as a plain script with literal arguments: arrays as
+  exact bytes, which keeps NaN, -0.0 and the dtype; larger ones as `.npy`. The
+  script then runs under the sanitizer, with `NUMBA_BOUNDSCHECK=1`, and as users
+  run it, with no harness installed.
+- Annotate each finding with what the fuzzer changed (shapes, dtypes and
+  scalar values versus the recorded call), and flag array arguments whose
+  lengths agreed in the recorded call but no longer do. In one product sample,
+  every memory-safety bug was such a length disagreement between arguments that
+  the kernel never checked.
+- Record whether the test called the function itself or the product called it
+  inside another call. A finding in the latter is reachable only through that
+  call or by calling the function directly, which usually lowers its severity.
